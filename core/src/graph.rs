@@ -50,7 +50,7 @@ impl GraphClient {
             let page: GraphCollection<T> = self.get_json(&url).await?;
             out.extend(page.value);
             match page.next_link {
-                Some(next) if next.starts_with(&self.base_url) => url = next,
+                Some(next) if same_graph_origin(&self.base_url, &next) => url = next,
                 Some(_) => return Err(GraphError::Decode("unexpected nextLink origin".into())),
                 None => break,
             }
@@ -107,6 +107,19 @@ impl GraphClient {
         }
         req.send().await.map_err(|e| GraphError::Network(e.to_string()))
     }
+}
+
+/// True only if `candidate` shares `base`'s scheme, host, port, and path prefix.
+/// Guards the bearer token against a forged `@odata.nextLink` pointing at a
+/// look-alike host (a raw string-prefix check would accept `graph.microsoft.com.evil`).
+fn same_graph_origin(base: &str, candidate: &str) -> bool {
+    let (Ok(base), Ok(next)) = (url::Url::parse(base), url::Url::parse(candidate)) else {
+        return false;
+    };
+    next.scheme() == base.scheme()
+        && next.host_str() == base.host_str()
+        && next.port_or_known_default() == base.port_or_known_default()
+        && next.path().starts_with(base.path())
 }
 
 /// Percent-encodes an opaque Graph id for safe use as a single URL path segment.

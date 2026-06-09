@@ -34,3 +34,28 @@ async fn list_lists_sends_bearer_and_parses() {
     assert_eq!(lists[0].id, "L1");
     assert_eq!(lists[1].display_name, "Groceries");
 }
+
+#[tokio::test]
+async fn rejects_next_link_to_foreign_origin() {
+    let server = MockServer::start().await;
+    // The first page points its nextLink at a DIFFERENT host; the client must
+    // refuse to follow it (and never send the bearer token there).
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [ { "id": "L1", "displayName": "Tasks" } ],
+            "@odata.nextLink": "http://evil.example/me/todo/lists?$skiptoken=x"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        Arc::new(StaticTokenProvider("test-token".to_string())),
+    );
+
+    let err = client.list_lists().await.unwrap_err();
+    assert!(matches!(err, outlook_tasks_core::GraphError::Decode(_)));
+}
