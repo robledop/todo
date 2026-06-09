@@ -96,3 +96,55 @@ async fn list_tasks_follows_next_link() {
     assert_eq!(tasks[0].id, "T1");
     assert_eq!(tasks[1].title, "Second");
 }
+
+use outlook_tasks_core::models::TaskStatus;
+use wiremock::matchers::body_json;
+
+#[tokio::test]
+async fn create_task_posts_title_and_parses_result() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/me/todo/lists/L1/tasks"))
+        .and(header("Authorization", "Bearer test-token"))
+        .and(body_json(json!({ "title": "Buy milk" })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "T9", "title": "Buy milk", "status": "notStarted"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
+    );
+
+    let task = client.create_task("L1", "Buy milk").await.unwrap();
+    assert_eq!(task.id, "T9");
+    assert_eq!(task.status, TaskStatus::NotStarted);
+}
+
+#[tokio::test]
+async fn set_status_patches_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/me/todo/lists/L1/tasks/T9"))
+        .and(header("Authorization", "Bearer test-token"))
+        .and(body_json(json!({ "status": "completed" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "T9", "title": "Buy milk", "status": "completed"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
+    );
+
+    let task = client.set_status("L1", "T9", TaskStatus::Completed).await.unwrap();
+    assert_eq!(task.status, TaskStatus::Completed);
+}

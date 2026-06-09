@@ -6,7 +6,6 @@ use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 
 use crate::error::{AuthError, GraphError};
-#[allow(unused_imports)]
 use crate::models::{CreateTask, GraphCollection, TaskStatus, TodoList, TodoTask, UpdateTaskStatus};
 
 /// Supplies bearer access tokens to the Graph client and refreshes them on demand.
@@ -46,6 +45,30 @@ impl GraphClient {
             seg(list_id)
         );
         self.collect_pages(url).await
+    }
+
+    /// Creates a task in a list from a title.
+    pub async fn create_task(&self, list_id: &str, title: &str) -> Result<TodoTask, GraphError> {
+        let url = format!("{}/me/todo/lists/{}/tasks", self.base_url, seg(list_id));
+        let body = serde_json::to_value(CreateTask { title })
+            .map_err(|e| GraphError::Decode(e.to_string()))?;
+        let resp = self.execute(Method::POST, &url, Some(body)).await?;
+        resp.json::<TodoTask>().await.map_err(|e| GraphError::Decode(e.to_string()))
+    }
+
+    /// Updates a task's status (e.g. `Completed`).
+    pub async fn set_status(
+        &self,
+        list_id: &str,
+        task_id: &str,
+        status: TaskStatus,
+    ) -> Result<TodoTask, GraphError> {
+        let url =
+            format!("{}/me/todo/lists/{}/tasks/{}", self.base_url, seg(list_id), seg(task_id));
+        let body = serde_json::to_value(UpdateTaskStatus { status })
+            .map_err(|e| GraphError::Decode(e.to_string()))?;
+        let resp = self.execute(Method::PATCH, &url, Some(body)).await?;
+        resp.json::<TodoTask>().await.map_err(|e| GraphError::Decode(e.to_string()))
     }
 
     /// GETs every page of an OData collection, following `@odata.nextLink`.
