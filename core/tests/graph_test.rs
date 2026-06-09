@@ -1,0 +1,36 @@
+mod common;
+
+use std::sync::Arc;
+use common::StaticTokenProvider;
+use outlook_tasks_core::graph::GraphClient;
+use serde_json::json;
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[tokio::test]
+async fn list_lists_sends_bearer_and_parses() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists"))
+        .and(header("Authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [
+                { "id": "L1", "displayName": "Tasks", "wellknownListName": "defaultList" },
+                { "id": "L2", "displayName": "Groceries" }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        Arc::new(StaticTokenProvider("test-token".to_string())),
+    );
+
+    let lists = client.list_lists().await.unwrap();
+    assert_eq!(lists.len(), 2);
+    assert_eq!(lists[0].id, "L1");
+    assert_eq!(lists[1].display_name, "Groceries");
+}
