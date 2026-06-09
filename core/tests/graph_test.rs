@@ -59,3 +59,40 @@ async fn rejects_next_link_to_foreign_origin() {
     let err = client.list_lists().await.unwrap_err();
     assert!(matches!(err, outlook_tasks_core::GraphError::Decode(_)));
 }
+
+#[tokio::test]
+async fn list_tasks_follows_next_link() {
+    let server = MockServer::start().await;
+    let page2 = format!("{}/me/todo/lists/L1/tasks-page2", server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists/L1/tasks"))
+        .and(header("Authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [ { "id": "T1", "title": "First", "status": "notStarted" } ],
+            "@odata.nextLink": page2
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists/L1/tasks-page2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [ { "id": "T2", "title": "Second", "status": "completed" } ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
+    );
+
+    let tasks = client.list_tasks("L1").await.unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(tasks[0].id, "T1");
+    assert_eq!(tasks[1].title, "Second");
+}

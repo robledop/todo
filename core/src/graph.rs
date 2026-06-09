@@ -37,6 +37,17 @@ impl GraphClient {
         self.collect_pages(format!("{}/me/todo/lists", self.base_url)).await
     }
 
+    /// Lists all tasks in a list, following `@odata.nextLink` pages. Trims the
+    /// payload with `$select=id,title,status`.
+    pub async fn list_tasks(&self, list_id: &str) -> Result<Vec<TodoTask>, GraphError> {
+        let url = format!(
+            "{}/me/todo/lists/{}/tasks?$select=id,title,status",
+            self.base_url,
+            seg(list_id)
+        );
+        self.collect_pages(url).await
+    }
+
     /// GETs every page of an OData collection, following `@odata.nextLink`.
     /// Refuses to follow a next link whose origin differs from `base_url` so a
     /// bearer token is never sent to an unexpected host.
