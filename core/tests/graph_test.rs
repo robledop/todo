@@ -148,3 +148,70 @@ async fn set_status_patches_status() {
     let task = client.set_status("L1", "T9", TaskStatus::Completed).await.unwrap();
     assert_eq!(task.status, TaskStatus::Completed);
 }
+
+use common::ScriptedProvider;
+use outlook_tasks_core::GraphError;
+use std::time::Duration;
+
+#[tokio::test]
+async fn retries_once_after_401_with_refreshed_token() {
+    let server = MockServer::start().await;
+    // Stale token -> 401.
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists"))
+        .and(header("Authorization", "Bearer stale"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    // Fresh token -> 200.
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists"))
+        .and(header("Authorization", "Bearer fresh"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
+        .mount(&server)
+        .await;
+
+    let provider = std::sync::Arc::new(ScriptedProvider::new("stale", "fresh"));
+    let client = GraphClient::new(server.uri(), reqwest::Client::new(), provider.clone());
+
+    let lists = client.list_lists().await.unwrap();
+    assert!(lists.is_empty());
+    assert_eq!(provider.refresh_count(), 1, "must force-refresh exactly once");
+}
+
+#[tokio::test]
+async fn forbidden_is_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists"))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(1) // exactly one request - no retry
+        .mount(&server)
+        .await;
+
+    let provider = std::sync::Arc::new(ScriptedProvider::new("t", "t2"));
+    let client = GraphClient::new(server.uri(), reqwest::Client::new(), provider.clone());
+
+    let err = client.list_lists().await.unwrap_err();
+    assert!(matches!(err, GraphError::Forbidden));
+    assert_eq!(provider.refresh_count(), 0, "403 must not trigger refresh");
+}
+
+#[tokio::test]
+async fn throttled_reads_retry_after() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists"))
+        .respond_with(ResponseTemplate::new(429).append_header("Retry-After", "30"))
+        .mount(&server)
+        .await;
+
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("t".to_string())),
+    );
+
+    let err = client.list_lists().await.unwrap_err();
+    assert!(matches!(err, GraphError::Throttled { retry_after: Some(d) } if d == Duration::from_secs(30)));
+}
