@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Outlook Tasks
+Comment=Manage your outlook.com tasks from the panel
+Type=Application
+Exec=cosmic-applet-outlook-tasks
+Icon=dev.robledo.OutlookTasks-symbolic
+Terminal=false
+Categories=COSMIC;
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto

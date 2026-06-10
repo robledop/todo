@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="addon">
+  <id>dev.robledo.OutlookTasks</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>Outlook Tasks</name>
+  <summary>Manage outlook.com tasks from the COSMIC panel</summary>
+  <description>
+    <p>A COSMIC panel applet to view, complete, and add Microsoft To Do tasks
+       on a personal outlook.com account via the Microsoft Graph API.</p>
+  </description>
+  <url type="homepage">https://github.com/robledo/outlook-tasks</url>
+</component>
