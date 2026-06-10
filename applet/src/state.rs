@@ -35,10 +35,10 @@ impl Ready {
     /// Picks the initial list: the persisted one if still present, else the
     /// default list (`wellknownListName == "defaultList"`), else the first.
     pub fn pick_initial_list(lists: &[TodoList], persisted: Option<&str>) -> Option<String> {
-        if let Some(id) = persisted {
-            if lists.iter().any(|l| l.id == id) {
-                return Some(id.to_string());
-            }
+        if let Some(id) = persisted
+            && lists.iter().any(|l| l.id == id)
+        {
+            return Some(id.to_string());
         }
         lists
             .iter()

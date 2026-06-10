@@ -199,17 +199,16 @@ impl cosmic::Application for AppModel {
             Message::UpdateConfig(config) => {
                 let switched = config.selected_list_id != self.config.selected_list_id;
                 self.config = config;
-                if switched {
-                    if let (AppState::Ready(ready), Some(id)) =
+                if switched
+                    && let (AppState::Ready(ready), Some(id)) =
                         (&mut self.state, self.config.selected_list_id.clone())
-                    {
-                        if ready.selected_list_id != id && ready.lists.iter().any(|l| l.id == id) {
-                            ready.selected_list_id = id.clone();
-                            ready.loading = true;
-                            ready.tasks.clear();
-                            return self.load_tasks(id);
-                        }
-                    }
+                    && ready.selected_list_id != id
+                    && ready.lists.iter().any(|l| l.id == id)
+                {
+                    ready.selected_list_id = id.clone();
+                    ready.loading = true;
+                    ready.tasks.clear();
+                    return self.load_tasks(id);
                 }
             }
 
@@ -274,10 +273,10 @@ impl cosmic::Application for AppModel {
             }
 
             Message::Tick | Message::Refresh => {
-                if let AppState::Ready(ready) = &self.state {
-                    if !ready.selected_list_id.is_empty() {
-                        return self.load_tasks(ready.selected_list_id.clone());
-                    }
+                if let AppState::Ready(ready) = &self.state
+                    && !ready.selected_list_id.is_empty()
+                {
+                    return self.load_tasks(ready.selected_list_id.clone());
                 }
             }
             Message::TasksLoaded(list_id, result) => {
@@ -320,10 +319,10 @@ impl cosmic::Application for AppModel {
 
             Message::ToggleTask(task_id) => return self.toggle_task(task_id),
             Message::TaskUpdated(_id, _prev, Ok(updated)) => {
-                if let AppState::Ready(ready) = &mut self.state {
-                    if let Some(t) = ready.tasks.iter_mut().find(|t| t.id == updated.id) {
-                        *t = updated;
-                    }
+                if let AppState::Ready(ready) = &mut self.state
+                    && let Some(t) = ready.tasks.iter_mut().find(|t| t.id == updated.id)
+                {
+                    *t = updated;
                 }
             }
             Message::TaskUpdated(task_id, prev, Err(e)) => {
@@ -606,10 +605,10 @@ impl AppModel {
     }
 
     fn persist_config(&self) {
-        if let Ok(ctx) = cosmic::cosmic_config::Config::new(APP_ID, Config::VERSION) {
-            if let Err(e) = self.config.write_entry(&ctx) {
-                log::warn!("failed to persist config: {e:?}");
-            }
+        if let Ok(ctx) = cosmic::cosmic_config::Config::new(APP_ID, Config::VERSION)
+            && let Err(e) = self.config.write_entry(&ctx)
+        {
+            log::warn!("failed to persist config: {e:?}");
         }
     }
 }

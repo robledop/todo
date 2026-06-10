@@ -88,12 +88,11 @@ impl Authenticator {
     /// stored refresh token on an unrecoverable `invalid_grant`.
     async fn refresh_locked(&self, force: bool) -> Result<String, AuthError> {
         let _guard = self.refresh_lock.lock().await;
-        if !force {
-            if let Some(c) = self.cache.lock().await.as_ref() {
-                if c.expires_at > Instant::now() {
-                    return Ok(c.token.clone());
-                }
-            }
+        if !force
+            && let Some(c) = self.cache.lock().await.as_ref()
+            && c.expires_at > Instant::now()
+        {
+            return Ok(c.token.clone());
         }
         let stored = self
             .store
@@ -134,10 +133,10 @@ impl Authenticator {
 #[async_trait]
 impl TokenProvider for Authenticator {
     async fn access_token(&self) -> Result<String, AuthError> {
-        if let Some(c) = self.cache.lock().await.as_ref() {
-            if c.expires_at > Instant::now() {
-                return Ok(c.token.clone());
-            }
+        if let Some(c) = self.cache.lock().await.as_ref()
+            && c.expires_at > Instant::now()
+        {
+            return Ok(c.token.clone());
         }
         self.refresh_locked(false).await
     }
