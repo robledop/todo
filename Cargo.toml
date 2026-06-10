@@ -3,7 +3,7 @@ resolver = "2"
 # `applet` is added to this list once the crate exists. Keeping it
 # out until then means `cargo` commands don't fail loading a
 # missing `applet/Cargo.toml`.
-members = ["core"]
+members = ["core", "applet"]
 
 [workspace.package]
 edition = "2024"
