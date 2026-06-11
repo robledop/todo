@@ -215,3 +215,31 @@ async fn throttled_reads_retry_after() {
     let err = client.list_lists().await.unwrap_err();
     assert!(matches!(err, GraphError::Throttled { retry_after: Some(d) } if d == Duration::from_secs(30)));
 }
+
+struct NoQuery;
+impl wiremock::Match for NoQuery {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        request.url.query().is_none()
+    }
+}
+
+#[tokio::test]
+async fn list_tasks_omits_select_query() {
+    // Microsoft To Do rejects `$select` on the tasks endpoint with
+    // 400 RequestBroker--ParseUri, so the client must request bare tasks.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists/L1/tasks"))
+        .and(NoQuery)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
+    );
+    let tasks = client.list_tasks("L1").await.unwrap();
+    assert!(tasks.is_empty());
+}

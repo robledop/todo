@@ -39,11 +39,9 @@ impl GraphClient {
     /// Lists all tasks in a list, following `@odata.nextLink` pages. Trims the
     /// payload with `$select=id,title,status`.
     pub async fn list_tasks(&self, list_id: &str) -> Result<Vec<TodoTask>, GraphError> {
-        let url = format!(
-            "{}/me/todo/lists/{}/tasks?$select=id,title,status",
-            self.base_url,
-            seg(list_id)
-        );
+        // No `$select`: the To Do tasks endpoint rejects it with 400
+        // RequestBroker--ParseUri. `TodoTask` ignores the extra fields anyway.
+        let url = format!("{}/me/todo/lists/{}/tasks", self.base_url, seg(list_id));
         self.collect_pages(url).await
     }
 
