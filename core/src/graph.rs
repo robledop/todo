@@ -158,8 +158,28 @@ fn same_graph_origin(base: &str, candidate: &str) -> bool {
 
 /// Percent-encodes an opaque Graph id for safe use as a single URL path segment.
 fn seg(id: &str) -> String {
-    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-    utf8_percent_encode(id, NON_ALPHANUMERIC).to_string()
+    use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+    // Encode only characters that would corrupt a single URL path segment, while
+    // leaving the base64url-ish id alphabet (including '-', '_', '=') literal:
+    // Graph's To Do endpoint rejects over-encoded ids with 400 RequestBroker--ParseUri.
+    const SEGMENT: &AsciiSet = &CONTROLS
+        .add(b' ')
+        .add(b'"')
+        .add(b'#')
+        .add(b'%')
+        .add(b'/')
+        .add(b'<')
+        .add(b'>')
+        .add(b'?')
+        .add(b'`')
+        .add(b'{')
+        .add(b'}')
+        .add(b'\\')
+        .add(b'^')
+        .add(b'|')
+        .add(b'[')
+        .add(b']');
+    utf8_percent_encode(id, SEGMENT).to_string()
 }
 
 /// Maps a response's status to `Ok(resp)` for 2xx, or a precise `GraphError`.
@@ -184,5 +204,25 @@ async fn map_status(resp: reqwest::Response) -> Result<reqwest::Response, GraphE
             let body = resp.text().await.unwrap_or_default();
             Err(GraphError::Http { status: other.as_u16(), body })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seg;
+
+    #[test]
+    fn seg_preserves_base64url_id_characters() {
+        // Microsoft To Do list/task ids are base64url-ish with '=' padding and
+        // must reach Graph literally; over-encoding '-', '_', or '=' triggers a
+        // 400 invalidRequest / RequestBroker--ParseUri.
+        assert_eq!(seg("AAMkAGI2THk-_AAA="), "AAMkAGI2THk-_AAA=");
+    }
+
+    #[test]
+    fn seg_encodes_path_breaking_characters() {
+        // Genuinely unsafe path characters must still be encoded so an id can't
+        // escape its path segment.
+        assert_eq!(seg("a/b?c#d e"), "a%2Fb%3Fc%23d%20e");
     }
 }
