@@ -1023,6 +1023,7 @@ dependencies = [
 name = "cosmic-applet-outlook-tasks"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "env_logger",
  "libcosmic",
  "log",

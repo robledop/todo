@@ -21,6 +21,28 @@ pub struct TodoTask {
     /// completed tasks by date.
     #[serde(rename = "lastModifiedDateTime", default, skip_serializing_if = "Option::is_none")]
     pub last_modified_date_time: Option<String>,
+    /// Due date, if set. A `dateTimeTimeZone` whose `date_time` is local to its
+    /// `time_zone`; only the calendar day matters for "due".
+    #[serde(rename = "dueDateTime", default, skip_serializing_if = "Option::is_none")]
+    pub due_date_time: Option<DateTimeTimeZone>,
+}
+
+impl TodoTask {
+    /// The due calendar day as `YYYY-MM-DD`, if a due date is set.
+    pub fn due_day(&self) -> Option<&str> {
+        self.due_date_time
+            .as_ref()
+            .map(|d| d.date_time.get(..10).unwrap_or(d.date_time.as_str()))
+    }
+}
+
+/// Microsoft Graph `dateTimeTimeZone`: a wall-clock time plus its zone name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DateTimeTimeZone {
+    #[serde(rename = "dateTime")]
+    pub date_time: String,
+    #[serde(rename = "timeZone", default, skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
 }
 
 /// `taskStatus` enumeration. `Unknown` guards against unknown future values.

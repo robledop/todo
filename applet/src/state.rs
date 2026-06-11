@@ -111,14 +111,37 @@ impl Ready {
         pending.append(&mut completed);
         pending
     }
+
+    /// Count of pending (not-completed) tasks that are currently due - their due
+    /// day is today or earlier. `today` is `YYYY-MM-DD`.
+    pub fn due_count(&self, today: &str) -> usize {
+        self.tasks
+            .iter()
+            .filter(|t| t.status != TaskStatus::Completed)
+            .filter(|t| t.due_day().is_some_and(|d| is_due(d, today)))
+            .count()
+    }
+}
+
+/// True when a task's due day (`YYYY-MM-DD`) is due - today or earlier.
+pub fn is_due(due_day: &str, today: &str) -> bool {
+    due_day <= today
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use outlook_tasks_core::models::DateTimeTimeZone;
+
     fn task(id: &str, status: TaskStatus) -> TodoTask {
-        TodoTask { id: id.into(), title: id.into(), status, last_modified_date_time: None }
+        TodoTask {
+            id: id.into(),
+            title: id.into(),
+            status,
+            last_modified_date_time: None,
+            due_date_time: None,
+        }
     }
 
     fn task_dated(id: &str, status: TaskStatus, date: &str) -> TodoTask {
@@ -127,6 +150,20 @@ mod tests {
             title: id.into(),
             status,
             last_modified_date_time: Some(date.into()),
+            due_date_time: None,
+        }
+    }
+
+    fn task_due(id: &str, status: TaskStatus, due_day: &str) -> TodoTask {
+        TodoTask {
+            id: id.into(),
+            title: id.into(),
+            status,
+            last_modified_date_time: None,
+            due_date_time: Some(DateTimeTimeZone {
+                date_time: format!("{due_day}T00:00:00.0000000"),
+                time_zone: Some("UTC".into()),
+            }),
         }
     }
 
@@ -211,5 +248,28 @@ mod tests {
         // Pending first, then completed sorted by date descending.
         let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
         assert_eq!(visible, vec!["p", "new", "old"]);
+    }
+
+    #[test]
+    fn is_due_includes_today_and_past_only() {
+        assert!(is_due("2026-06-01", "2026-06-13")); // past
+        assert!(is_due("2026-06-13", "2026-06-13")); // today
+        assert!(!is_due("2026-06-20", "2026-06-13")); // future
+    }
+
+    #[test]
+    fn due_count_counts_pending_due_tasks() {
+        let ready = Ready {
+            tasks: vec![
+                task_due("overdue", TaskStatus::NotStarted, "2026-06-01"),
+                task_due("today", TaskStatus::NotStarted, "2026-06-13"),
+                task_due("future", TaskStatus::NotStarted, "2026-06-20"),
+                task("nodue", TaskStatus::NotStarted),
+                task_due("done", TaskStatus::Completed, "2026-06-01"),
+            ],
+            ..Default::default()
+        };
+        // overdue + today; future, no-due, and completed are excluded.
+        assert_eq!(ready.due_count("2026-06-13"), 2);
     }
 }

@@ -59,6 +59,13 @@ fn classify_graph(e: GraphError) -> FetchError {
     }
 }
 
+/// Formats a `YYYY-MM-DD` due day as e.g. "Jun 15"; falls back to the raw value.
+fn format_due(day: &str) -> String {
+    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+        .map(|d| d.format("%b %-d").to_string())
+        .unwrap_or_else(|_| day.to_string())
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     TogglePopup,
@@ -125,11 +132,12 @@ impl cosmic::Application for AppModel {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let open = match &self.state {
-            AppState::Ready(ready) => ready.open_count(),
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let due = match &self.state {
+            AppState::Ready(ready) => ready.due_count(&today),
             _ => 0,
         };
-        if open == 0 {
+        if due == 0 {
             return self
                 .core
                 .applet
@@ -137,13 +145,10 @@ impl cosmic::Application for AppModel {
                 .on_press(Message::TogglePopup)
                 .into();
         }
-        // Panel badge: icon + open-task count. (libcosmic widget surface may drift
-        // by pinned rev; verify button::custom / icon /
-        // theme::Button::AppletIcon against the rev, and wrap in `autosize` if the
-        // panel clips it, as the time applet does.)
+        // Panel badge: icon + count of currently-due tasks.
         let body = widget::Row::new()
             .push(widget::icon::from_name("checkbox-checked-symbolic").size(16))
-            .push(widget::text::body(open.to_string()))
+            .push(widget::text::body(due.to_string()))
             .spacing(4)
             .align_y(Alignment::Center);
         widget::button::custom(body)
@@ -358,7 +363,9 @@ impl cosmic::Application for AppModel {
 
 impl AppModel {
     fn ready_view<'a>(&'a self, ready: &'a Ready) -> Element<'a, Message> {
-        // Header: list dropdown + refresh + open count.
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        // Header: list dropdown + refresh.
         let names: Vec<String> = ready.lists.iter().map(|l| l.display_name.clone()).collect();
         let selected_idx = ready
             .lists
@@ -379,22 +386,40 @@ impl AppModel {
             .align_y(Alignment::Center)
             .spacing(8);
 
-        // Task rows: pending first; completed appended only when toggled on.
+        // Task rows: title on the left, due date on the right (red when due).
         let visible = ready.visible_tasks();
         let mut list = widget::Column::new().spacing(4);
         for task in &visible {
             let id = task.id.clone();
             let checked = task.status == TaskStatus::Completed;
-            let row = widget::Row::new()
+            let mut row = widget::Row::new()
                 .push(widget::checkbox(checked).on_toggle(move |_| Message::ToggleTask(id.clone())))
                 .push(widget::text::body(&task.title))
                 .align_y(Alignment::Center)
                 .spacing(8);
+            if let Some(day) = task.due_day() {
+                let mut due_label = widget::text::caption(format_due(day));
+                if crate::state::is_due(day, &today) {
+                    due_label = due_label.class(cosmic::theme::Text::Color(
+                        cosmic::iced::Color::from_rgb(0.8, 0.2, 0.2),
+                    ));
+                }
+                row = row.push(widget::space::horizontal()).push(due_label);
+            }
             list = list.push(row);
         }
-        if visible.is_empty() && !ready.loading {
-            let empty = if ready.show_completed { "No tasks." } else { "No pending tasks." };
-            list = list.push(widget::text::body(empty));
+        if visible.is_empty() {
+            let msg = if ready.loading {
+                "Loading..."
+            } else if ready.show_completed {
+                "No tasks."
+            } else {
+                "No pending tasks."
+            };
+            list = list.push(widget::text::body(msg));
+        } else if ready.loading {
+            // Reload in progress (e.g. fetching completed) - shown below current rows.
+            list = list.push(widget::text::caption("Loading..."));
         }
 
         let show_completed_toggle = widget::Row::new()
@@ -409,7 +434,11 @@ impl AppModel {
 
         let mut col = widget::Column::new()
             .push(header)
-            .push(widget::text::caption(format!("{} open", ready.open_count())))
+            .push(widget::text::caption(format!(
+                "{} open · {} due",
+                ready.open_count(),
+                ready.due_count(&today)
+            )))
             .push(show_completed_toggle)
             .push(widget::divider::horizontal::default())
             .push(widget::scrollable(list).height(Length::Fixed(280.0)))
@@ -585,6 +614,7 @@ impl AppModel {
             title: title.clone(),
             status: TaskStatus::NotStarted,
             last_modified_date_time: None,
+            due_date_time: None,
         });
         ready.add_input.clear();
         let list_id = ready.selected_list_id.clone();
