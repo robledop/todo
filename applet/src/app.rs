@@ -79,6 +79,7 @@ pub enum Message {
     TaskCreated(String, Result<TodoTask, FetchError>),
     ToggleTask(String),
     TaskUpdated(String, TaskStatus, Result<TodoTask, FetchError>),
+    ShowCompleted(bool),
     Retry,
 }
 
@@ -305,6 +306,12 @@ impl cosmic::Application for AppModel {
             }
             Message::AddSubmit => return self.add_task(),
 
+            Message::ShowCompleted(show) => {
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.show_completed = show;
+                }
+            }
+
             Message::TaskCreated(temp_id, Ok(created)) => {
                 if let AppState::Ready(ready) = &mut self.state {
                     ready.reconcile_created(&temp_id, created);
@@ -363,9 +370,10 @@ impl AppModel {
             .align_y(Alignment::Center)
             .spacing(8);
 
-        // Task rows.
+        // Task rows: pending first; completed appended only when toggled on.
+        let visible = ready.visible_tasks();
         let mut list = widget::Column::new().spacing(4);
-        for task in &ready.tasks {
+        for task in &visible {
             let id = task.id.clone();
             let checked = task.status == TaskStatus::Completed;
             let row = widget::Row::new()
@@ -375,9 +383,16 @@ impl AppModel {
                 .spacing(8);
             list = list.push(row);
         }
-        if ready.tasks.is_empty() && !ready.loading {
-            list = list.push(widget::text::body("No tasks."));
+        if visible.is_empty() && !ready.loading {
+            let empty = if ready.show_completed { "No tasks." } else { "No pending tasks." };
+            list = list.push(widget::text::body(empty));
         }
+
+        let show_completed_toggle = widget::Row::new()
+            .push(widget::checkbox(ready.show_completed).on_toggle(Message::ShowCompleted))
+            .push(widget::text::body("Show completed"))
+            .align_y(Alignment::Center)
+            .spacing(8);
 
         let add = widget::text_input("Add a task...", &ready.add_input)
             .on_input(Message::AddInput)
@@ -386,6 +401,7 @@ impl AppModel {
         let mut col = widget::Column::new()
             .push(header)
             .push(widget::text::caption(format!("{} open", ready.open_count())))
+            .push(show_completed_toggle)
             .push(widget::divider::horizontal::default())
             .push(widget::scrollable(list).height(Length::Fixed(280.0)))
             .push(widget::divider::horizontal::default())
@@ -556,6 +572,7 @@ impl AppModel {
             id: temp_id.clone(),
             title: title.clone(),
             status: TaskStatus::NotStarted,
+            last_modified_date_time: None,
         });
         ready.add_input.clear();
         let list_id = ready.selected_list_id.clone();

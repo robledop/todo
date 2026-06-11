@@ -17,6 +17,10 @@ pub struct TodoTask {
     pub id: String,
     pub title: String,
     pub status: TaskStatus,
+    /// UTC ISO-8601 timestamp; sortable lexicographically. Used to order
+    /// completed tasks by date.
+    #[serde(rename = "lastModifiedDateTime", default, skip_serializing_if = "Option::is_none")]
+    pub last_modified_date_time: Option<String>,
 }
 
 /// `taskStatus` enumeration. `Unknown` guards against unknown future values.

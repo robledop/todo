@@ -35,3 +35,10 @@ fn todo_task_ignores_unknown_fields() {
     assert_eq!(t.title, "Buy milk");
     assert_eq!(t.status, TaskStatus::NotStarted);
 }
+
+#[test]
+fn todo_task_parses_last_modified_date_time() {
+    let json = r#"{"id":"T1","title":"x","status":"completed","lastModifiedDateTime":"2026-06-10T00:00:00Z"}"#;
+    let t: TodoTask = serde_json::from_str(json).unwrap();
+    assert_eq!(t.last_modified_date_time.as_deref(), Some("2026-06-10T00:00:00Z"));
+}

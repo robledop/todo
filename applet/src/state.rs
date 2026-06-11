@@ -24,6 +24,8 @@ pub struct Ready {
     pub add_input: String,
     pub error: Option<String>,
     pub loading: bool,
+    /// When false (default), completed tasks are hidden from the list.
+    pub show_completed: bool,
 }
 
 impl Ready {
@@ -93,6 +95,22 @@ impl Ready {
     pub fn is_placeholder(id: &str) -> bool {
         id.starts_with("temp-")
     }
+
+    /// Tasks to render: pending tasks (in server order) always; when
+    /// `show_completed` is set, completed tasks follow, most-recent first by
+    /// `last_modified_date_time` (unknown dates sort last).
+    pub fn visible_tasks(&self) -> Vec<&TodoTask> {
+        let mut pending: Vec<&TodoTask> =
+            self.tasks.iter().filter(|t| t.status != TaskStatus::Completed).collect();
+        if !self.show_completed {
+            return pending;
+        }
+        let mut completed: Vec<&TodoTask> =
+            self.tasks.iter().filter(|t| t.status == TaskStatus::Completed).collect();
+        completed.sort_by(|a, b| b.last_modified_date_time.cmp(&a.last_modified_date_time));
+        pending.append(&mut completed);
+        pending
+    }
 }
 
 #[cfg(test)]
@@ -100,7 +118,16 @@ mod tests {
     use super::*;
 
     fn task(id: &str, status: TaskStatus) -> TodoTask {
-        TodoTask { id: id.into(), title: id.into(), status }
+        TodoTask { id: id.into(), title: id.into(), status, last_modified_date_time: None }
+    }
+
+    fn task_dated(id: &str, status: TaskStatus, date: &str) -> TodoTask {
+        TodoTask {
+            id: id.into(),
+            title: id.into(),
+            status,
+            last_modified_date_time: Some(date.into()),
+        }
     }
 
     #[test]
@@ -154,5 +181,35 @@ mod tests {
         ready.apply_refresh(vec![task("T1", TaskStatus::NotStarted)]);
         assert_eq!(ready.tasks.len(), 2);
         assert!(ready.tasks.iter().any(|t| t.id == "temp-1"));
+    }
+
+    #[test]
+    fn visible_tasks_hides_completed_by_default() {
+        let ready = Ready {
+            tasks: vec![
+                task("a", TaskStatus::NotStarted),
+                task("b", TaskStatus::Completed),
+                task("c", TaskStatus::InProgress),
+            ],
+            ..Default::default()
+        };
+        let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(visible, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn visible_tasks_appends_completed_newest_first_when_enabled() {
+        let ready = Ready {
+            show_completed: true,
+            tasks: vec![
+                task("p", TaskStatus::NotStarted),
+                task_dated("old", TaskStatus::Completed, "2026-06-01T00:00:00Z"),
+                task_dated("new", TaskStatus::Completed, "2026-06-10T00:00:00Z"),
+            ],
+            ..Default::default()
+        };
+        // Pending first, then completed sorted by date descending.
+        let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(visible, vec!["p", "new", "old"]);
     }
 }
