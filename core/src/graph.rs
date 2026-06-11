@@ -81,6 +81,14 @@ impl GraphClient {
         resp.json::<TodoTask>().await.map_err(|e| GraphError::Decode(e.to_string()))
     }
 
+    /// Deletes a task. Expects HTTP 204; non-2xx maps through `GraphError`.
+    pub async fn delete_task(&self, list_id: &str, task_id: &str) -> Result<(), GraphError> {
+        let url =
+            format!("{}/me/todo/lists/{}/tasks/{}", self.base_url, seg(list_id), seg(task_id));
+        self.execute(Method::DELETE, &url, None).await?;
+        Ok(())
+    }
+
     /// GETs every page of an OData collection, following `@odata.nextLink`.
     /// Refuses to follow a next link whose origin differs from `base_url` so a
     /// bearer token is never sent to an unexpected host.

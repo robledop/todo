@@ -267,3 +267,38 @@ async fn list_tasks_pending_only_filters_server_side() {
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].id, "T1");
 }
+
+#[tokio::test]
+async fn delete_task_sends_delete_and_succeeds_on_204() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/me/todo/lists/L1/tasks/T9"))
+        .and(header("Authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
+    );
+    client.delete_task("L1", "T9").await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_task_maps_404_to_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/me/todo/lists/L1/tasks/GONE"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("t".to_string())),
+    );
+    let err = client.delete_task("L1", "GONE").await.unwrap_err();
+    assert!(matches!(err, outlook_tasks_core::GraphError::Http { status: 404, .. }));
+}
