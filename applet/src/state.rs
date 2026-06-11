@@ -96,12 +96,20 @@ impl Ready {
         id.starts_with("temp-")
     }
 
-    /// Tasks to render: pending tasks (in server order) always; when
-    /// `show_completed` is set, completed tasks follow, most-recent first by
-    /// `last_modified_date_time` (unknown dates sort last).
+    /// Tasks to render: pending tasks sorted by due date ascending (overdue/due
+    /// first, undated last) always; when `show_completed` is set, completed
+    /// tasks follow, most-recent first by `last_modified_date_time`.
     pub fn visible_tasks(&self) -> Vec<&TodoTask> {
         let mut pending: Vec<&TodoTask> =
             self.tasks.iter().filter(|t| t.status != TaskStatus::Completed).collect();
+        // Sort by due date ascending so due/overdue (red) tasks float to the top;
+        // tasks with no due date go last (server order preserved among ties).
+        pending.sort_by(|a, b| {
+            a.due_day()
+                .is_none()
+                .cmp(&b.due_day().is_none())
+                .then_with(|| a.due_day().cmp(&b.due_day()))
+        });
         if !self.show_completed {
             return pending;
         }
@@ -248,6 +256,21 @@ mod tests {
         // Pending first, then completed sorted by date descending.
         let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
         assert_eq!(visible, vec!["p", "new", "old"]);
+    }
+
+    #[test]
+    fn visible_tasks_sorted_by_due_date_undated_last() {
+        let ready = Ready {
+            tasks: vec![
+                task_due("future", TaskStatus::NotStarted, "2026-07-04"),
+                task("nodue", TaskStatus::NotStarted),
+                task_due("overdue", TaskStatus::NotStarted, "2026-06-04"),
+                task_due("soon", TaskStatus::NotStarted, "2026-06-16"),
+            ],
+            ..Default::default()
+        };
+        let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(visible, vec!["overdue", "soon", "future", "nodue"]);
     }
 
     #[test]
