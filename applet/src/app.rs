@@ -387,8 +387,11 @@ impl AppModel {
             .spacing(8);
 
         // Task rows: title on the left, due date on the right (red when due).
+        // Right padding keeps the due dates clear of the scrollbar lane.
         let visible = ready.visible_tasks();
-        let mut list = widget::Column::new().spacing(4);
+        let mut list = widget::Column::new()
+            .spacing(4)
+            .padding(cosmic::iced::Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 0.0 });
         for task in &visible {
             let id = task.id.clone();
             let checked = task.status == TaskStatus::Completed;
