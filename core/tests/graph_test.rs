@@ -4,7 +4,7 @@ use std::sync::Arc;
 use common::StaticTokenProvider;
 use outlook_tasks_core::graph::GraphClient;
 use serde_json::json;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -91,7 +91,7 @@ async fn list_tasks_follows_next_link() {
         std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
     );
 
-    let tasks = client.list_tasks("L1").await.unwrap();
+    let tasks = client.list_tasks("L1", true).await.unwrap();
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0].id, "T1");
     assert_eq!(tasks[1].title, "Second");
@@ -240,6 +240,30 @@ async fn list_tasks_omits_select_query() {
         reqwest::Client::new(),
         std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
     );
-    let tasks = client.list_tasks("L1").await.unwrap();
+    let tasks = client.list_tasks("L1", true).await.unwrap();
     assert!(tasks.is_empty());
+}
+
+#[tokio::test]
+async fn list_tasks_pending_only_filters_server_side() {
+    // Without completed, the client asks the server to filter, which is much
+    // faster than paging every completed task. To Do supports this $filter.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists/L1/tasks"))
+        .and(query_param("$filter", "status ne 'completed'"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [ { "id": "T1", "title": "Buy milk", "status": "notStarted" } ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
+    );
+    let tasks = client.list_tasks("L1", false).await.unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, "T1");
 }

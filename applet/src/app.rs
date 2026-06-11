@@ -307,8 +307,17 @@ impl cosmic::Application for AppModel {
             Message::AddSubmit => return self.add_task(),
 
             Message::ShowCompleted(show) => {
-                if let AppState::Ready(ready) = &mut self.state {
+                // Refetch: ticking on loads completed tasks; ticking off returns
+                // to the fast pending-only request.
+                let list_id = if let AppState::Ready(ready) = &mut self.state {
                     ready.show_completed = show;
+                    ready.loading = true;
+                    (!ready.selected_list_id.is_empty()).then(|| ready.selected_list_id.clone())
+                } else {
+                    None
+                };
+                if let Some(list_id) = list_id {
+                    return self.load_tasks(list_id);
                 }
             }
 
@@ -546,10 +555,13 @@ impl AppModel {
         let Some(services) = &self.services else {
             return Task::none();
         };
+        // Only fetch completed tasks when the user has opted in - pending-only is
+        // a single fast request; "all" pages through every completed task.
+        let include_completed = matches!(&self.state, AppState::Ready(r) if r.show_completed);
         let graph = services.graph.clone();
         let id_for_msg = list_id.clone();
         Task::perform(
-            async move { graph.list_tasks(&list_id).await.map_err(classify_graph) },
+            async move { graph.list_tasks(&list_id, include_completed).await.map_err(classify_graph) },
             move |r| cosmic::action::app(Message::TasksLoaded(id_for_msg.clone(), r)),
         )
     }

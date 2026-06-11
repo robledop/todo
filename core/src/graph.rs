@@ -38,10 +38,22 @@ impl GraphClient {
 
     /// Lists all tasks in a list, following `@odata.nextLink` pages. Trims the
     /// payload with `$select=id,title,status`.
-    pub async fn list_tasks(&self, list_id: &str) -> Result<Vec<TodoTask>, GraphError> {
-        // No `$select`: the To Do tasks endpoint rejects it with 400
-        // RequestBroker--ParseUri. `TodoTask` ignores the extra fields anyway.
-        let url = format!("{}/me/todo/lists/{}/tasks", self.base_url, seg(list_id));
+    /// Lists tasks in a list. When `include_completed` is false, asks the server
+    /// for only not-completed tasks (`$filter=status ne 'completed'`), which is
+    /// far faster than paging through every completed task. No `$select`: the
+    /// To Do tasks endpoint rejects it with 400 RequestBroker--ParseUri.
+    pub async fn list_tasks(
+        &self,
+        list_id: &str,
+        include_completed: bool,
+    ) -> Result<Vec<TodoTask>, GraphError> {
+        let path = format!("{}/me/todo/lists/{}/tasks", self.base_url, seg(list_id));
+        let url = if include_completed {
+            path
+        } else {
+            // `$filter=status ne 'completed'`, with spaces and quotes encoded.
+            format!("{path}?$filter=status%20ne%20%27completed%27")
+        };
         self.collect_pages(url).await
     }
 
