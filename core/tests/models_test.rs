@@ -68,3 +68,49 @@ fn importance_roundtrips_camelcase_and_defaults_normal() {
     let u: Importance = serde_json::from_str("\"weird\"").unwrap();
     assert_eq!(u, Importance::Unknown); // forward-compatible
 }
+
+use outlook_tasks_core::models::{
+    PatternedRecurrence, RecurrencePattern, RecurrencePatternType, RecurrenceRange,
+    RecurrenceRangeType,
+};
+
+#[test]
+fn weekly_recurrence_serializes_to_graph_shape() {
+    let rec = PatternedRecurrence {
+        pattern: RecurrencePattern {
+            pattern_type: RecurrencePatternType::Weekly,
+            interval: 2,
+            month: None,
+            day_of_month: None,
+            days_of_week: vec!["monday".into(), "thursday".into()],
+            first_day_of_week: Some("sunday".into()),
+            index: None,
+        },
+        range: RecurrenceRange {
+            range_type: RecurrenceRangeType::NoEnd,
+            start_date: "2026-06-20".into(),
+            end_date: None,
+            number_of_occurrences: None,
+            recurrence_time_zone: Some("UTC".into()),
+        },
+    };
+    let v = serde_json::to_value(&rec).unwrap();
+    assert_eq!(v["pattern"]["type"], "weekly");
+    assert_eq!(v["pattern"]["interval"], 2);
+    assert_eq!(v["pattern"]["daysOfWeek"], serde_json::json!(["monday", "thursday"]));
+    assert_eq!(v["range"]["type"], "noEnd");
+    assert_eq!(v["range"]["startDate"], "2026-06-20");
+    // unset numeric/string fields are omitted
+    assert!(v["pattern"].get("dayOfMonth").is_none());
+    assert!(v["range"].get("endDate").is_none());
+}
+
+#[test]
+fn recurrence_deserializes_relative_monthly() {
+    let json = r#"{"pattern":{"type":"relativeMonthly","interval":1,"daysOfWeek":["tuesday"],"index":"third"},"range":{"type":"numbered","startDate":"2026-01-01","numberOfOccurrences":5}}"#;
+    let rec: PatternedRecurrence = serde_json::from_str(json).unwrap();
+    assert_eq!(rec.pattern.pattern_type, RecurrencePatternType::RelativeMonthly);
+    assert_eq!(rec.pattern.index.as_deref(), Some("third"));
+    assert_eq!(rec.range.range_type, RecurrenceRangeType::Numbered);
+    assert_eq!(rec.range.number_of_occurrences, Some(5));
+}

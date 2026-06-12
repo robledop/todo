@@ -71,6 +71,81 @@ pub enum Importance {
     Unknown,
 }
 
+/// `recurrencePattern.type`. `Unknown` keeps a new Graph value from failing the
+/// whole task decode (the form treats `Unknown` as "no recurrence").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecurrencePatternType {
+    Daily,
+    Weekly,
+    AbsoluteMonthly,
+    RelativeMonthly,
+    AbsoluteYearly,
+    RelativeYearly,
+    #[serde(other)]
+    Unknown,
+}
+
+/// `recurrencePattern.index` for relative monthly/yearly patterns. Only used by
+/// the form (the wire model stores `index: Option<String>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WeekIndex {
+    First,
+    Second,
+    Third,
+    Fourth,
+    Last,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecurrencePattern {
+    #[serde(rename = "type")]
+    pub pattern_type: RecurrencePatternType,
+    pub interval: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub month: Option<u8>,
+    #[serde(rename = "dayOfMonth", default, skip_serializing_if = "Option::is_none")]
+    pub day_of_month: Option<u8>,
+    #[serde(rename = "daysOfWeek", default, skip_serializing_if = "Vec::is_empty")]
+    pub days_of_week: Vec<String>,
+    #[serde(rename = "firstDayOfWeek", default, skip_serializing_if = "Option::is_none")]
+    pub first_day_of_week: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
+}
+
+/// `recurrenceRange.type`. `Unknown` guards against new Graph values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecurrenceRangeType {
+    EndDate,
+    NoEnd,
+    Numbered,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecurrenceRange {
+    #[serde(rename = "type")]
+    pub range_type: RecurrenceRangeType,
+    #[serde(rename = "startDate")]
+    pub start_date: String,
+    #[serde(rename = "endDate", default, skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    #[serde(rename = "numberOfOccurrences", default, skip_serializing_if = "Option::is_none")]
+    pub number_of_occurrences: Option<i32>,
+    #[serde(rename = "recurrenceTimeZone", default, skip_serializing_if = "Option::is_none")]
+    pub recurrence_time_zone: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatternedRecurrence {
+    pub pattern: RecurrencePattern,
+    pub range: RecurrenceRange,
+}
+
 /// OData collection envelope: `{ "value": [...], "@odata.nextLink": "..." }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphCollection<T> {
