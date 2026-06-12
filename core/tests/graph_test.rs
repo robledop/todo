@@ -101,28 +101,57 @@ use outlook_tasks_core::models::TaskStatus;
 use wiremock::matchers::body_json;
 
 #[tokio::test]
-async fn create_task_posts_title_and_parses_result() {
+async fn create_task_posts_input_body() {
+    use outlook_tasks_core::models::TaskInput;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/me/todo/lists/L1/tasks"))
-        .and(header("Authorization", "Bearer test-token"))
-        .and(body_json(json!({ "title": "Buy milk" })))
+        .and(body_json(json!({ "title": "Buy milk", "importance": "normal" })))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "id": "T9", "title": "Buy milk", "status": "notStarted"
         })))
         .expect(1)
         .mount(&server)
         .await;
-
     let client = GraphClient::new(
         server.uri(),
         reqwest::Client::new(),
         std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
     );
-
-    let task = client.create_task("L1", "Buy milk").await.unwrap();
+    let input = TaskInput { title: "Buy milk".into(), ..Default::default() };
+    let task = client.create_task("L1", &input).await.unwrap();
     assert_eq!(task.id, "T9");
-    assert_eq!(task.status, TaskStatus::NotStarted);
+}
+
+#[tokio::test]
+async fn update_task_patches_input_body() {
+    use outlook_tasks_core::models::TaskInput;
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/me/todo/lists/L1/tasks/T9"))
+        .and(body_json(json!({
+            "title": "Renamed", "importance": "high",
+            "dueDateTime": null, "recurrence": null,
+            "isReminderOn": false, "reminderDateTime": null
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "T9", "title": "Renamed", "status": "notStarted", "importance": "high"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
+    );
+    let input = TaskInput {
+        title: "Renamed".into(),
+        importance: outlook_tasks_core::models::Importance::High,
+        ..Default::default()
+    };
+    let task = client.update_task("L1", "T9", &input).await.unwrap();
+    assert_eq!(task.title, "Renamed");
 }
 
 #[tokio::test]

@@ -666,7 +666,6 @@ impl AppModel {
         let Some(services) = &self.services else {
             return Task::none();
         };
-        let graph = services.graph.clone();
         let AppState::Ready(ready) = &mut self.state else {
             return Task::none();
         };
@@ -684,8 +683,10 @@ impl AppModel {
         });
         ready.add_input.clear();
         let list_id = ready.selected_list_id.clone();
+        let input = outlook_tasks_core::models::TaskInput { title: title.clone(), ..Default::default() };
+        let graph = services.graph.clone();
         Task::perform(
-            async move { graph.create_task(&list_id, &title).await.map_err(classify_graph) },
+            async move { graph.create_task(&list_id, &input).await.map_err(classify_graph) },
             move |r| cosmic::action::app(Message::TaskCreated(temp_id.clone(), r)),
         )
     }

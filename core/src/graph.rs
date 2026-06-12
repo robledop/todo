@@ -6,7 +6,7 @@ use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 
 use crate::error::{AuthError, GraphError};
-use crate::models::{CreateTask, GraphCollection, TaskStatus, TodoList, TodoTask, UpdateTaskStatus};
+use crate::models::{GraphCollection, TaskInput, TaskStatus, TodoList, TodoTask, UpdateTaskStatus};
 
 /// Supplies bearer access tokens to the Graph client and refreshes them on demand.
 #[async_trait]
@@ -57,12 +57,23 @@ impl GraphClient {
         self.collect_pages(url).await
     }
 
-    /// Creates a task in a list from a title.
-    pub async fn create_task(&self, list_id: &str, title: &str) -> Result<TodoTask, GraphError> {
+    /// Creates a task in a list from the given input.
+    pub async fn create_task(&self, list_id: &str, input: &TaskInput) -> Result<TodoTask, GraphError> {
         let url = format!("{}/me/todo/lists/{}/tasks", self.base_url, seg(list_id));
-        let body = serde_json::to_value(CreateTask { title })
-            .map_err(|e| GraphError::Decode(e.to_string()))?;
-        let resp = self.execute(Method::POST, &url, Some(body)).await?;
+        let resp = self.execute(Method::POST, &url, Some(input.to_body(false))).await?;
+        resp.json::<TodoTask>().await.map_err(|e| GraphError::Decode(e.to_string()))
+    }
+
+    /// Updates a task's editable fields (PATCH).
+    pub async fn update_task(
+        &self,
+        list_id: &str,
+        task_id: &str,
+        input: &TaskInput,
+    ) -> Result<TodoTask, GraphError> {
+        let url =
+            format!("{}/me/todo/lists/{}/tasks/{}", self.base_url, seg(list_id), seg(task_id));
+        let resp = self.execute(Method::PATCH, &url, Some(input.to_body(true))).await?;
         resp.json::<TodoTask>().await.map_err(|e| GraphError::Decode(e.to_string()))
     }
 

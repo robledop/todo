@@ -167,10 +167,53 @@ pub struct GraphCollection<T> {
     pub next_link: Option<String>,
 }
 
-/// Minimal create-task request body: `{"title":"..."}`.
-#[derive(Debug, Clone, Serialize)]
-pub struct CreateTask<'a> {
-    pub title: &'a str,
+/// Editable fields for creating or updating a task. `to_body` produces the Graph
+/// request JSON: on create, unset optional fields are omitted; on update, they are
+/// sent as explicit nulls so an edit can clear them.
+#[derive(Debug, Clone, Default)]
+pub struct TaskInput {
+    pub title: String,
+    pub importance: Importance,
+    pub due: Option<DateTimeTimeZone>,
+    pub recurrence: Option<PatternedRecurrence>,
+    pub reminder: Option<DateTimeTimeZone>,
+}
+
+impl TaskInput {
+    pub fn to_body(&self, for_update: bool) -> serde_json::Value {
+        use serde_json::{json, Map, Value};
+        let mut o = Map::new();
+        o.insert("title".into(), json!(self.title));
+        o.insert("importance".into(), serde_json::to_value(self.importance).unwrap());
+
+        let opt = |o: &mut Map<String, Value>, key: &str, val: Option<Value>| match val {
+            Some(v) => {
+                o.insert(key.into(), v);
+            }
+            None => {
+                if for_update {
+                    o.insert(key.into(), Value::Null);
+                }
+            }
+        };
+
+        opt(&mut o, "dueDateTime", self.due.as_ref().map(|d| serde_json::to_value(d).unwrap()));
+        opt(&mut o, "recurrence", self.recurrence.as_ref().map(|r| serde_json::to_value(r).unwrap()));
+
+        match &self.reminder {
+            Some(r) => {
+                o.insert("isReminderOn".into(), json!(true));
+                o.insert("reminderDateTime".into(), serde_json::to_value(r).unwrap());
+            }
+            None => {
+                if for_update {
+                    o.insert("isReminderOn".into(), json!(false));
+                    o.insert("reminderDateTime".into(), Value::Null);
+                }
+            }
+        }
+        Value::Object(o)
+    }
 }
 
 /// Partial update body for completing/changing a task: `{"status":"completed"}`.

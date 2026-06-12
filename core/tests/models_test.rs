@@ -134,3 +134,76 @@ fn todo_task_parses_importance_recurrence_reminder_with_defaults() {
     assert!(!bare.is_reminder_on);
     assert!(bare.recurrence.is_none());
 }
+
+use outlook_tasks_core::models::TaskInput;
+
+#[test]
+fn task_input_create_body_skips_unset_fields() {
+    let input = TaskInput { title: "Buy milk".into(), ..Default::default() };
+    let v = input.to_body(false); // create
+    assert_eq!(v["title"], "Buy milk");
+    assert_eq!(v["importance"], "normal");
+    assert!(v.get("dueDateTime").is_none());
+    assert!(v.get("recurrence").is_none());
+    assert!(v.get("isReminderOn").is_none());
+}
+
+#[test]
+fn task_input_update_body_sends_nulls_to_clear() {
+    use serde_json::Value;
+    let input = TaskInput { title: "x".into(), ..Default::default() };
+    let v = input.to_body(true); // update
+    // The key must be PRESENT and null (not absent - `["k"].is_null()` is true for both).
+    assert_eq!(v.get("dueDateTime"), Some(&Value::Null));
+    assert_eq!(v.get("recurrence"), Some(&Value::Null));
+    assert_eq!(v.get("isReminderOn"), Some(&Value::Bool(false)));
+    assert_eq!(v.get("reminderDateTime"), Some(&Value::Null));
+}
+
+#[test]
+fn task_input_body_includes_due_and_reminder_when_set() {
+    let dt = |s: &str| outlook_tasks_core::models::DateTimeTimeZone {
+        date_time: s.into(),
+        time_zone: Some("UTC".into()),
+    };
+    let input = TaskInput {
+        title: "x".into(),
+        due: Some(dt("2026-06-20T00:00:00.0000000")),
+        reminder: Some(dt("2026-06-20T09:00:00.0000000")),
+        ..Default::default()
+    };
+    let v = input.to_body(false);
+    assert_eq!(v["dueDateTime"]["dateTime"], "2026-06-20T00:00:00.0000000");
+    assert_eq!(v["isReminderOn"], true);
+    assert_eq!(v["reminderDateTime"]["dateTime"], "2026-06-20T09:00:00.0000000");
+}
+
+#[test]
+fn task_input_body_includes_recurrence() {
+    use outlook_tasks_core::models::{
+        PatternedRecurrence, RecurrencePattern, RecurrencePatternType, RecurrenceRange,
+        RecurrenceRangeType,
+    };
+    let rec = PatternedRecurrence {
+        pattern: RecurrencePattern {
+            pattern_type: RecurrencePatternType::Daily,
+            interval: 1,
+            month: None,
+            day_of_month: None,
+            days_of_week: vec![],
+            first_day_of_week: None,
+            index: None,
+        },
+        range: RecurrenceRange {
+            range_type: RecurrenceRangeType::NoEnd,
+            start_date: "2026-06-20".into(),
+            end_date: None,
+            number_of_occurrences: None,
+            recurrence_time_zone: Some("UTC".into()),
+        },
+    };
+    let input = TaskInput { title: "x".into(), recurrence: Some(rec), ..Default::default() };
+    let v = input.to_body(false);
+    assert_eq!(v["recurrence"]["pattern"]["type"], "daily");
+    assert_eq!(v["recurrence"]["range"]["startDate"], "2026-06-20");
+}
