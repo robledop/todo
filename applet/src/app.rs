@@ -86,6 +86,10 @@ pub enum Message {
     TaskCreated(String, Result<TodoTask, FetchError>),
     ToggleTask(String),
     TaskUpdated(String, TaskStatus, Result<TodoTask, FetchError>),
+    DeleteRequested(String),
+    DeleteCancelled,
+    DeleteConfirmed(String),
+    TaskDeleted(Box<TodoTask>, Result<(), FetchError>),
     ShowCompleted(bool),
     Retry,
 }
@@ -352,6 +356,37 @@ impl cosmic::Application for AppModel {
                 }
                 return self.handle_fetch_error(e);
             }
+
+            Message::DeleteRequested(id) => {
+                // A not-yet-created task has no server id - can't be deleted.
+                if !crate::state::Ready::is_placeholder(&id)
+                    && let AppState::Ready(ready) = &mut self.state
+                {
+                    ready.request_delete(&id);
+                }
+            }
+            Message::DeleteCancelled => {
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.cancel_delete();
+                }
+            }
+            Message::DeleteConfirmed(id) => return self.delete_task(id),
+            Message::TaskDeleted(task, Ok(())) => {
+                // Ensure it's gone even if a poll re-added it between remove and ack.
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.tasks.retain(|t| t.id != task.id);
+                }
+            }
+            Message::TaskDeleted(task, Err(e)) => {
+                // Restore the optimistically-removed task, then route the typed error
+                // (auth-expiry/throttle handled by handle_fetch_error).
+                if let AppState::Ready(ready) = &mut self.state
+                    && !ready.tasks.iter().any(|t| t.id == task.id)
+                {
+                    ready.tasks.push(*task);
+                }
+                return self.handle_fetch_error(e);
+            }
         }
         Task::none()
     }
@@ -394,9 +429,29 @@ impl AppModel {
             .padding(cosmic::iced::Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 0.0 });
         for task in &visible {
             let id = task.id.clone();
+            // A row pending delete confirmation shows a prompt instead of the task.
+            if ready.confirming_delete.as_deref() == Some(task.id.as_str()) {
+                let confirm = widget::Row::new()
+                    .push(widget::text::body(format!("Delete \u{201c}{}\u{201d}?", task.title)))
+                    .push(widget::space::horizontal())
+                    .push(
+                        widget::button::destructive("Delete")
+                            .on_press(Message::DeleteConfirmed(id.clone())),
+                    )
+                    .push(widget::button::text("Cancel").on_press(Message::DeleteCancelled))
+                    .align_y(Alignment::Center)
+                    .spacing(8);
+                list = list.push(confirm);
+                continue;
+            }
             let checked = task.status == TaskStatus::Completed;
             let mut row = widget::Row::new()
-                .push(widget::checkbox(checked).on_toggle(move |_| Message::ToggleTask(id.clone())))
+                .push(widget::checkbox(checked).on_toggle({
+                    let id = id.clone();
+                    move |_| Message::ToggleTask(id.clone())
+                }))
+                // OpenEdit / clickable title are not wired up yet; keep the
+                // title as plain text for now.
                 .push(widget::text::body(&task.title))
                 .align_y(Alignment::Center)
                 .spacing(8);
@@ -408,6 +463,15 @@ impl AppModel {
                     ));
                 }
                 row = row.push(widget::space::horizontal()).push(due_label);
+            } else {
+                row = row.push(widget::space::horizontal());
+            }
+            // No trash on a not-yet-created (temp-) row.
+            if !Ready::is_placeholder(&task.id) {
+                row = row.push(
+                    widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
+                        .on_press(Message::DeleteRequested(id.clone())),
+                );
             }
             list = list.push(row);
         }
@@ -654,6 +718,23 @@ impl AppModel {
                 graph.set_status(&list_id, &task_id, new_status).await.map_err(classify_graph)
             },
             move |r| cosmic::action::app(Message::TaskUpdated(id_for_msg.clone(), prev, r)),
+        )
+    }
+
+    fn delete_task(&mut self, task_id: String) -> Task<cosmic::Action<Message>> {
+        let Some(services) = &self.services else { return Task::none() };
+        let graph = services.graph.clone();
+        let AppState::Ready(ready) = &mut self.state else { return Task::none() };
+        ready.cancel_delete();
+        let Some(pos) = ready.tasks.iter().position(|t| t.id == task_id) else {
+            return Task::none();
+        };
+        let removed = ready.tasks.remove(pos); // optimistic remove
+        let list_id = ready.selected_list_id.clone();
+        let carried = removed.clone();
+        Task::perform(
+            async move { graph.delete_task(&list_id, &task_id).await.map_err(classify_graph) },
+            move |r| cosmic::action::app(Message::TaskDeleted(Box::new(carried.clone()), r)),
         )
     }
 

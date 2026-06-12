@@ -26,6 +26,8 @@ pub struct Ready {
     pub loading: bool,
     /// When false (default), completed tasks are hidden from the list.
     pub show_completed: bool,
+    /// Id of the task currently awaiting delete confirmation, if any.
+    pub confirming_delete: Option<String>,
 }
 
 impl Ready {
@@ -128,6 +130,16 @@ impl Ready {
             .filter(|t| t.status != TaskStatus::Completed)
             .filter(|t| t.due_day().is_some_and(|d| is_due(d, today)))
             .count()
+    }
+
+    /// Marks a task for delete confirmation (replacing any prior one).
+    pub fn request_delete(&mut self, task_id: &str) {
+        self.confirming_delete = Some(task_id.to_string());
+    }
+
+    /// Clears the pending delete confirmation.
+    pub fn cancel_delete(&mut self) {
+        self.confirming_delete = None;
     }
 }
 
@@ -294,5 +306,19 @@ mod tests {
         };
         // overdue + today; future, no-due, and completed are excluded.
         assert_eq!(ready.due_count("2026-06-13"), 2);
+    }
+
+    #[test]
+    fn delete_confirmation_is_single_and_clearable() {
+        let mut ready = Ready {
+            tasks: vec![task("a", TaskStatus::NotStarted), task("b", TaskStatus::NotStarted)],
+            ..Default::default()
+        };
+        ready.request_delete("a");
+        assert_eq!(ready.confirming_delete.as_deref(), Some("a"));
+        ready.request_delete("b"); // replaces
+        assert_eq!(ready.confirming_delete.as_deref(), Some("b"));
+        ready.cancel_delete();
+        assert_eq!(ready.confirming_delete, None);
     }
 }
