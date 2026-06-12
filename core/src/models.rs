@@ -58,6 +58,19 @@ pub enum TaskStatus {
     Unknown,
 }
 
+/// `importance` enumeration; serialized as camelCase (`"low"`/`"normal"`/`"high"`).
+/// `Unknown` keeps an unexpected Graph value from failing the whole task decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum Importance {
+    Low,
+    #[default]
+    Normal,
+    High,
+    #[serde(other)]
+    Unknown,
+}
+
 /// OData collection envelope: `{ "value": [...], "@odata.nextLink": "..." }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphCollection<T> {

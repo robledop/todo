@@ -56,3 +56,15 @@ fn todo_task_without_due_has_no_day() {
     let t: TodoTask = serde_json::from_str(json).unwrap();
     assert_eq!(t.due_day(), None);
 }
+
+use outlook_tasks_core::models::Importance;
+
+#[test]
+fn importance_roundtrips_camelcase_and_defaults_normal() {
+    assert_eq!(serde_json::to_string(&Importance::High).unwrap(), "\"high\"");
+    let i: Importance = serde_json::from_str("\"low\"").unwrap();
+    assert_eq!(i, Importance::Low);
+    assert_eq!(Importance::default(), Importance::Normal);
+    let u: Importance = serde_json::from_str("\"weird\"").unwrap();
+    assert_eq!(u, Importance::Unknown); // forward-compatible
+}
