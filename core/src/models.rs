@@ -12,7 +12,7 @@ pub struct TodoList {
 }
 
 /// A task (`todoTask`), reduced to the fields v1 uses.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TodoTask {
     pub id: String,
     pub title: String,
@@ -25,6 +25,18 @@ pub struct TodoTask {
     /// `time_zone`; only the calendar day matters for "due".
     #[serde(rename = "dueDateTime", default, skip_serializing_if = "Option::is_none")]
     pub due_date_time: Option<DateTimeTimeZone>,
+    #[serde(default, skip_serializing_if = "is_normal")]
+    pub importance: Importance,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurrence: Option<PatternedRecurrence>,
+    #[serde(rename = "isReminderOn", default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_reminder_on: bool,
+    #[serde(rename = "reminderDateTime", default, skip_serializing_if = "Option::is_none")]
+    pub reminder_date_time: Option<DateTimeTimeZone>,
+}
+
+fn is_normal(i: &Importance) -> bool {
+    *i == Importance::Normal
 }
 
 impl TodoTask {
@@ -46,9 +58,10 @@ pub struct DateTimeTimeZone {
 }
 
 /// `taskStatus` enumeration. `Unknown` guards against unknown future values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum TaskStatus {
+    #[default]
     NotStarted,
     InProgress,
     Completed,

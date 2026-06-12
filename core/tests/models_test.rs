@@ -114,3 +114,23 @@ fn recurrence_deserializes_relative_monthly() {
     assert_eq!(rec.range.range_type, RecurrenceRangeType::Numbered);
     assert_eq!(rec.range.number_of_occurrences, Some(5));
 }
+
+#[test]
+fn todo_task_parses_importance_recurrence_reminder_with_defaults() {
+    let json = r#"{
+        "id":"T1","title":"x","status":"notStarted","importance":"high","isReminderOn":true,
+        "reminderDateTime":{"dateTime":"2026-06-20T09:00:00.0000000","timeZone":"UTC"},
+        "recurrence":{"pattern":{"type":"daily","interval":1},"range":{"type":"noEnd","startDate":"2026-06-20"}}
+    }"#;
+    let t: TodoTask = serde_json::from_str(json).unwrap();
+    assert_eq!(t.importance, Importance::High);
+    assert!(t.is_reminder_on);
+    assert_eq!(t.reminder_date_time.as_ref().unwrap().date_time, "2026-06-20T09:00:00.0000000");
+    assert_eq!(t.recurrence.as_ref().unwrap().pattern.pattern_type, RecurrencePatternType::Daily);
+
+    // Missing fields default cleanly.
+    let bare: TodoTask = serde_json::from_str(r#"{"id":"T2","title":"y","status":"completed"}"#).unwrap();
+    assert_eq!(bare.importance, Importance::Normal);
+    assert!(!bare.is_reminder_on);
+    assert!(bare.recurrence.is_none());
+}

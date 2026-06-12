@@ -680,8 +680,7 @@ impl AppModel {
             id: temp_id.clone(),
             title: title.clone(),
             status: TaskStatus::NotStarted,
-            last_modified_date_time: None,
-            due_date_time: None,
+            ..Default::default()
         });
         ready.add_input.clear();
         let list_id = ready.selected_list_id.clone();

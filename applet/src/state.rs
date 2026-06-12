@@ -155,13 +155,7 @@ mod tests {
     use outlook_tasks_core::models::DateTimeTimeZone;
 
     fn task(id: &str, status: TaskStatus) -> TodoTask {
-        TodoTask {
-            id: id.into(),
-            title: id.into(),
-            status,
-            last_modified_date_time: None,
-            due_date_time: None,
-        }
+        TodoTask { id: id.into(), title: id.into(), status, ..Default::default() }
     }
 
     fn task_dated(id: &str, status: TaskStatus, date: &str) -> TodoTask {
@@ -170,7 +164,7 @@ mod tests {
             title: id.into(),
             status,
             last_modified_date_time: Some(date.into()),
-            due_date_time: None,
+            ..Default::default()
         }
     }
 
@@ -179,11 +173,11 @@ mod tests {
             id: id.into(),
             title: id.into(),
             status,
-            last_modified_date_time: None,
             due_date_time: Some(DateTimeTimeZone {
                 date_time: format!("{due_day}T00:00:00.0000000"),
                 time_zone: Some("UTC".into()),
             }),
+            ..Default::default()
         }
     }
 
