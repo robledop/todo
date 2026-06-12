@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod consts;
 mod state;
+mod task_form;
 
 fn main() -> cosmic::iced::Result {
     env_logger::init();
