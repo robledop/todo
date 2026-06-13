@@ -7,7 +7,8 @@ use crate::task_form::TaskForm;
 pub enum PopupView {
     #[default]
     List,
-    Form(TaskForm),
+    // Boxed: TaskForm is large (calendar models), keeping PopupView/Ready small.
+    Form(Box<TaskForm>),
 }
 
 /// Top-level UI state.

@@ -399,7 +399,7 @@ impl cosmic::Application for AppModel {
 
             Message::OpenCreate => {
                 if let AppState::Ready(ready) = &mut self.state {
-                    ready.view = PopupView::Form(crate::task_form::TaskForm::create());
+                    ready.view = PopupView::Form(Box::new(crate::task_form::TaskForm::create()));
                 }
             }
             Message::OpenEdit(id) => {
@@ -408,7 +408,7 @@ impl cosmic::Application for AppModel {
                     && let AppState::Ready(ready) = &mut self.state
                     && let Some(task) = ready.tasks.iter().find(|t| t.id == id)
                 {
-                    ready.view = PopupView::Form(crate::task_form::TaskForm::from_task(task));
+                    ready.view = PopupView::Form(Box::new(crate::task_form::TaskForm::from_task(task)));
                 }
             }
             Message::CancelForm => {
@@ -420,7 +420,7 @@ impl cosmic::Application for AppModel {
                 if let AppState::Ready(ready) = &mut self.state
                     && let PopupView::Form(form) = &mut ready.view
                 {
-                    form.apply(fmsg);
+                    form.as_mut().apply(fmsg);
                 }
             }
             Message::SaveForm => return self.save_form(),
@@ -544,10 +544,13 @@ impl AppModel {
             }
             // No trash on a not-yet-created (temp-) row.
             if !Ready::is_placeholder(&task.id) {
-                row = row.push(
-                    widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
-                        .on_press(Message::DeleteRequested(id.clone())),
-                );
+                let delete = widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
+                    .on_press(Message::DeleteRequested(id.clone()));
+                row = row.push(widget::tooltip(
+                    delete,
+                    widget::text::body("Delete task"),
+                    widget::tooltip::Position::Top,
+                ));
             }
             list = list.push(row);
         }

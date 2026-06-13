@@ -308,12 +308,12 @@ impl TaskForm {
 
         // Weekly with no explicit days: mirror to_input's due-weekday default so a
         // title-only edit doesn't silently change the schedule on save.
-        if self.repeat == RepeatKind::Weekly && !self.weekdays.iter().any(|b| *b) {
-            if let Some(due) = self.due.clone() {
-                if let Some(i) = wd_index(&due_weekday(&due)) {
-                    self.weekdays[i] = true;
-                }
-            }
+        if self.repeat == RepeatKind::Weekly
+            && !self.weekdays.iter().any(|b| *b)
+            && let Some(due) = self.due.clone()
+            && let Some(i) = wd_index(&due_weekday(&due))
+        {
+            self.weekdays[i] = true;
         }
 
         match rec.range.range_type {
@@ -507,17 +507,25 @@ pub fn form_view(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
     // Disable Save while the form is invalid (timezone-independent check, same as
     // the validity hint above): an omitted `on_press` renders a disabled button.
     let save_press = form.to_input("UTC").is_ok().then_some(Message::SaveForm);
+
+    // The form body scrolls; the action bar is pinned below it so Save and Cancel
+    // stay visible however long the form grows or whichever date picker is open.
+    let body = widget::scrollable(col.spacing(8).padding(12))
+        .height(cosmic::iced::Length::Fixed(380.0));
+
     let footer = widget::Row::new()
         .push(widget::space::horizontal())
         .push(widget::button::text("Cancel").on_press(Message::CancelForm))
         .push(widget::button::suggested("Save").on_press_maybe(save_press))
         .align_y(cosmic::iced::Alignment::Center)
-        .spacing(8);
+        .spacing(8)
+        .padding(cosmic::iced::Padding { top: 0.0, right: 12.0, bottom: 12.0, left: 12.0 });
 
-    col = col.push(footer);
-
-    widget::scrollable(col.spacing(8).padding(12))
-        .height(cosmic::iced::Length::Fixed(420.0))
+    widget::Column::new()
+        .push(body)
+        .push(widget::divider::horizontal::default())
+        .push(footer)
+        .spacing(8)
         .into()
 }
 
@@ -559,8 +567,13 @@ fn date_field<'a>(
             move || Message::Form(next.clone()),
             jiff::civil::Weekday::Sunday,
         );
+        // A bare popover popup has no surface of its own and renders see-through
+        // over the form; give the calendar an opaque themed background.
+        let popup = widget::container(cal)
+            .padding(cosmic::theme::spacing().space_xs)
+            .class(cosmic::theme::Container::Dropdown);
         widget::popover(button)
-            .popup(cal)
+            .popup(popup)
             .on_close(Message::Form(toggle))
             .into()
     } else {
