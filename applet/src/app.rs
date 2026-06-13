@@ -17,7 +17,7 @@ use outlook_tasks_core::GraphError;
 
 use crate::config::Config;
 use crate::consts::{ACCOUNT_ID, APP_ID, CLIENT_ID, GRAPH_BASE};
-use crate::state::{AppState, Ready};
+use crate::state::{AppState, PopupView, Ready};
 
 /// The authenticated services. Held as `Option` so a (practically impossible)
 /// construction failure from malformed constants degrades to a config-error
@@ -90,6 +90,9 @@ pub enum Message {
     DeleteCancelled,
     DeleteConfirmed(String),
     TaskDeleted(Box<TodoTask>, Result<(), FetchError>),
+    OpenCreate,
+    OpenEdit(String),
+    CancelForm,
     ShowCompleted(bool),
     Retry,
 }
@@ -189,7 +192,10 @@ impl cosmic::Application for AppModel {
                 .spacing(8)
                 .padding(12)
                 .into(),
-            AppState::Ready(ready) => self.ready_view(ready),
+            AppState::Ready(ready) => match &ready.view {
+                PopupView::List => self.ready_view(ready),
+                PopupView::Form(form) => crate::task_form::form_view(form),
+            },
         };
         self.core.applet.popup_container(content).into()
     }
@@ -387,6 +393,26 @@ impl cosmic::Application for AppModel {
                 }
                 return self.handle_fetch_error(e);
             }
+
+            Message::OpenCreate => {
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.view = PopupView::Form(crate::task_form::TaskForm::create());
+                }
+            }
+            Message::OpenEdit(id) => {
+                // A not-yet-created (temp-) task can't be edited via PATCH.
+                if !crate::state::Ready::is_placeholder(&id)
+                    && let AppState::Ready(ready) = &mut self.state
+                    && let Some(task) = ready.tasks.iter().find(|t| t.id == id)
+                {
+                    ready.view = PopupView::Form(crate::task_form::TaskForm::from_task(task));
+                }
+            }
+            Message::CancelForm => {
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.view = PopupView::List;
+                }
+            }
         }
         Task::none()
     }
@@ -414,6 +440,10 @@ impl AppModel {
         let header = widget::Row::new()
             .push(dropdown)
             .push(widget::space::horizontal())
+            .push(
+                widget::button::icon(widget::icon::from_name("list-add-symbolic"))
+                    .on_press(Message::OpenCreate),
+            )
             .push(
                 widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
                     .on_press(Message::Refresh),
@@ -445,14 +475,21 @@ impl AppModel {
                 continue;
             }
             let checked = task.status == TaskStatus::Completed;
+            let edit_id = id.clone();
             let mut row = widget::Row::new()
                 .push(widget::checkbox(checked).on_toggle({
                     let id = id.clone();
                     move |_| Message::ToggleTask(id.clone())
                 }))
-                // OpenEdit / clickable title are not wired up yet; keep the
-                // title as plain text for now.
-                .push(widget::text::body(&task.title))
+                // A real task's title opens the edit form; a not-yet-created (temp-)
+                // row has no server id to edit, so it stays plain text.
+                .push(if Ready::is_placeholder(&task.id) {
+                    Element::from(widget::text::body(task.title.clone()))
+                } else {
+                    widget::button::link(task.title.clone())
+                        .on_press(Message::OpenEdit(edit_id))
+                        .into()
+                })
                 .align_y(Alignment::Center)
                 .spacing(8);
             if let Some(day) = task.due_day() {

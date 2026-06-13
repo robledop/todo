@@ -1,5 +1,15 @@
 use outlook_tasks_core::models::{TaskStatus, TodoList, TodoTask};
 
+use crate::task_form::TaskForm;
+
+/// Which popup screen is shown: the task list, or the create/edit form.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PopupView {
+    #[default]
+    List,
+    Form(TaskForm),
+}
+
 /// Top-level UI state.
 #[derive(Debug, Clone)]
 pub enum AppState {
@@ -28,6 +38,8 @@ pub struct Ready {
     pub show_completed: bool,
     /// Id of the task currently awaiting delete confirmation, if any.
     pub confirming_delete: Option<String>,
+    /// Whether the popup shows the task list or the create/edit form.
+    pub view: PopupView,
 }
 
 impl Ready {

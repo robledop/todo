@@ -308,6 +308,11 @@ impl TaskForm {
     }
 }
 
+/// Placeholder form view; full field rendering is not implemented yet.
+pub fn form_view(_form: &TaskForm) -> cosmic::Element<'static, crate::app::Message> {
+    cosmic::widget::text::body("Task form").into()
+}
+
 fn day_to_dtz(day: &str, tz: &str) -> DateTimeTimeZone {
     DateTimeTimeZone { date_time: format!("{day}T00:00:00.0000000"), time_zone: Some(tz.to_string()) }
 }
