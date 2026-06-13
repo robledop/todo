@@ -94,6 +94,8 @@ pub enum Message {
     OpenEdit(String),
     CancelForm,
     Form(crate::task_form::FormMsg),
+    SaveForm,
+    FormSaved(Result<Box<TodoTask>, FetchError>),
     ShowCompleted(bool),
     Retry,
 }
@@ -421,6 +423,28 @@ impl cosmic::Application for AppModel {
                     form.apply(fmsg);
                 }
             }
+            Message::SaveForm => return self.save_form(),
+            Message::FormSaved(Ok(task)) => {
+                // Apply the returned task immediately (the next poll reconciles the rest):
+                // replace by id on edit, push on create.
+                if let AppState::Ready(ready) = &mut self.state {
+                    let id = task.id.clone();
+                    if let Some(existing) = ready.tasks.iter_mut().find(|t| t.id == id) {
+                        *existing = *task;
+                    } else {
+                        ready.tasks.push(*task);
+                    }
+                    ready.view = crate::state::PopupView::List;
+                }
+            }
+            Message::FormSaved(Err(e)) => {
+                if let AppState::Ready(ready) = &mut self.state
+                    && let crate::state::PopupView::Form(form) = &mut ready.view
+                {
+                    form.error = Some("Save failed".into());
+                }
+                return self.handle_fetch_error(e);
+            }
         }
         Task::none()
     }
@@ -488,7 +512,14 @@ impl AppModel {
                 .push(widget::checkbox(checked).on_toggle({
                     let id = id.clone();
                     move |_| Message::ToggleTask(id.clone())
-                }))
+                }));
+            // High-importance marker: a red "!" between the checkbox and the title.
+            if task.importance == outlook_tasks_core::models::Importance::High {
+                row = row.push(widget::text::body("!").class(cosmic::theme::Text::Color(
+                    cosmic::iced::Color::from_rgb(0.8, 0.2, 0.2),
+                )));
+            }
+            let mut row = row
                 // A real task's title opens the edit form; a not-yet-created (temp-)
                 // row has no server id to edit, so it stays plain text.
                 .push(if Ready::is_placeholder(&task.id) {
@@ -783,6 +814,40 @@ impl AppModel {
         )
     }
 
+    fn save_form(&mut self) -> Task<cosmic::Action<Message>> {
+        let Some(services) = &self.services else { return Task::none() };
+        let graph = services.graph.clone();
+        let tz = system_tz();
+        let AppState::Ready(ready) = &mut self.state else { return Task::none() };
+        let crate::state::PopupView::Form(form) = &mut ready.view else { return Task::none() };
+        let input = match form.to_input(&tz) {
+            Ok(i) => i,
+            Err(msg) => {
+                form.error = Some(msg.to_string());
+                return Task::none();
+            }
+        };
+        let mode = form.mode.clone();
+        let list_id = ready.selected_list_id.clone();
+        Task::perform(
+            async move {
+                match mode {
+                    crate::task_form::FormMode::Create => graph
+                        .create_task(&list_id, &input)
+                        .await
+                        .map(Box::new)
+                        .map_err(classify_graph),
+                    crate::task_form::FormMode::Edit { task_id } => graph
+                        .update_task(&list_id, &task_id, &input)
+                        .await
+                        .map(Box::new)
+                        .map_err(classify_graph),
+                }
+            },
+            |r| cosmic::action::app(Message::FormSaved(r)),
+        )
+    }
+
     fn set_error(&mut self, message: String) {
         if let AppState::Ready(ready) = &mut self.state {
             ready.loading = false;
@@ -799,6 +864,15 @@ impl AppModel {
             log::warn!("failed to persist config: {e:?}");
         }
     }
+}
+
+/// The system IANA timezone name (e.g. "America/Sao_Paulo"), or "UTC" if unknown.
+/// Used for `dueDateTime`/`reminderDateTime` so reminders fire at local wall time.
+fn system_tz() -> String {
+    jiff::tz::TimeZone::system()
+        .iana_name()
+        .map(str::to_string)
+        .unwrap_or_else(|| "UTC".to_string())
 }
 
 /// Runs the full interactive sign-in and maps the outcome (including a missing

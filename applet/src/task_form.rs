@@ -453,8 +453,8 @@ const WEEKDAY_LABELS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Su
 const INDEX_LABELS: [&str; 5] = ["First", "Second", "Third", "Fourth", "Last"];
 
 /// Renders the create/edit form. All field edits route through
-/// `Message::Form(FormMsg::...)`; Cancel returns to the list. The Save button is
-/// not wired up yet - this view shows Cancel and a validity hint only.
+/// `Message::Form(FormMsg::...)`; Cancel returns to the list and Save commits.
+/// Save is disabled while the form is invalid (the validity hint says why).
 pub fn form_view(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
     use crate::app::Message;
     use cosmic::widget;
@@ -504,9 +504,13 @@ pub fn form_view(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
         col = col.push(error_caption(err));
     }
 
+    // Disable Save while the form is invalid (timezone-independent check, same as
+    // the validity hint above): an omitted `on_press` renders a disabled button.
+    let save_press = form.to_input("UTC").is_ok().then_some(Message::SaveForm);
     let footer = widget::Row::new()
         .push(widget::space::horizontal())
         .push(widget::button::text("Cancel").on_press(Message::CancelForm))
+        .push(widget::button::suggested("Save").on_press_maybe(save_press))
         .align_y(cosmic::iced::Alignment::Center)
         .spacing(8);
 
