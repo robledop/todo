@@ -438,11 +438,19 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::FormSaved(Err(e)) => {
-                if let AppState::Ready(ready) = &mut self.state
-                    && let crate::state::PopupView::Form(form) = &mut ready.view
-                {
-                    form.error = Some("Save failed".into());
+                log::error!("save failed: {e:?}");
+                // A request error (e.g. a Graph 400) carries the real reason in its
+                // body; show it in the form and keep the form open so it can be
+                // corrected and retried, rather than a generic "Save failed".
+                if let FetchError::Other(msg) = &e {
+                    if let AppState::Ready(ready) = &mut self.state
+                        && let crate::state::PopupView::Form(form) = &mut ready.view
+                    {
+                        form.error = Some(msg.clone());
+                    }
+                    return Task::none();
                 }
+                // Auth-expiry and throttling keep their existing handling.
                 return self.handle_fetch_error(e);
             }
         }

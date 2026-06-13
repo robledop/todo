@@ -197,7 +197,7 @@ fn task_input_body_includes_recurrence() {
         range: RecurrenceRange {
             range_type: RecurrenceRangeType::NoEnd,
             start_date: "2026-06-20".into(),
-            end_date: None,
+            end_date: Some("2026-12-31".into()),
             number_of_occurrences: None,
             recurrence_time_zone: Some("UTC".into()),
         },
@@ -205,5 +205,10 @@ fn task_input_body_includes_recurrence() {
     let input = TaskInput { title: "x".into(), recurrence: Some(rec), ..Default::default() };
     let v = input.to_body(false);
     assert_eq!(v["recurrence"]["pattern"]["type"], "daily");
-    assert_eq!(v["recurrence"]["range"]["startDate"], "2026-06-20");
+    assert_eq!(v["recurrence"]["range"]["type"], "noEnd");
+    assert_eq!(v["recurrence"]["range"]["recurrenceTimeZone"], "UTC");
+    // The To Do endpoint 400s on any Edm.Date in the range, so startDate/endDate
+    // are omitted from the request; the service derives the start from dueDateTime.
+    assert!(v["recurrence"]["range"].get("startDate").is_none(), "startDate must be omitted");
+    assert!(v["recurrence"]["range"].get("endDate").is_none(), "endDate must be omitted");
 }

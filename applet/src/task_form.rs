@@ -27,14 +27,6 @@ pub enum MonthlyMode {
     NthWeekday,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum EndKind {
-    #[default]
-    Never,
-    OnDate,
-    After,
-}
-
 /// Plain, UI-independent form data. Dates are `YYYY-MM-DD` strings; the time is
 /// `HH:MM`. (The view layer keeps separate `CalendarModel`s for the pickers.)
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,9 +42,6 @@ pub struct TaskForm {
     pub nth_index: WeekIndex,         // for NthWeekday
     pub nth_weekday: usize,           // 0=Mon..6=Sun
     pub year_month: u8,               // 1..=12 (yearly)
-    pub end: EndKind,
-    pub end_date: Option<String>,     // YYYY-MM-DD (OnDate)
-    pub occurrences: u32,             // After N
     pub importance: Importance,
     pub reminder_on: bool,
     pub reminder_date: Option<String>, // YYYY-MM-DD
@@ -63,8 +52,6 @@ pub struct TaskForm {
     // in PartialEq/Eq - fine, CalendarModel is Eq.
     pub due_open: bool,
     pub due_cal: cosmic::widget::calendar::CalendarModel,
-    pub end_open: bool,
-    pub end_cal: cosmic::widget::calendar::CalendarModel,
     pub reminder_open: bool,
     pub reminder_cal: cosmic::widget::calendar::CalendarModel,
 }
@@ -83,9 +70,6 @@ impl Default for TaskForm {
             nth_index: WeekIndex::First,
             nth_weekday: 0,
             year_month: 1,
-            end: EndKind::Never,
-            end_date: None,
-            occurrences: 1,
             importance: Importance::Normal,
             reminder_on: false,
             reminder_date: None,
@@ -93,8 +77,6 @@ impl Default for TaskForm {
             error: None,
             due_open: false,
             due_cal: cosmic::widget::calendar::CalendarModel::now(),
-            end_open: false,
-            end_cal: cosmic::widget::calendar::CalendarModel::now(),
             reminder_open: false,
             reminder_cal: cosmic::widget::calendar::CalendarModel::now(),
         }
@@ -116,9 +98,6 @@ impl TaskForm {
         if self.repeat != RepeatKind::None && self.due.is_none() {
             return Err("Set a due date to repeat");
         }
-        if self.repeat != RepeatKind::None && self.end == EndKind::OnDate && self.end_date.is_none() {
-            return Err("Set an end date");
-        }
 
         let reminder = if self.reminder_on {
             let date = self.reminder_date.as_ref().ok_or("Set a reminder date")?;
@@ -132,12 +111,12 @@ impl TaskForm {
         };
 
         let due = self.due.as_ref().map(|d| day_to_dtz(d, tz));
-        let recurrence = self.build_recurrence(tz);
+        let recurrence = self.build_recurrence();
 
         Ok(TaskInput { title: title.to_string(), importance: self.importance, due, recurrence, reminder })
     }
 
-    fn build_recurrence(&self, tz: &str) -> Option<PatternedRecurrence> {
+    fn build_recurrence(&self) -> Option<PatternedRecurrence> {
         if self.repeat == RepeatKind::None {
             return None;
         }
@@ -191,12 +170,6 @@ impl TaskForm {
             },
         };
 
-        let (range_type, end_date, occ) = match self.end {
-            EndKind::Never => (RecurrenceRangeType::NoEnd, None, None),
-            EndKind::OnDate => (RecurrenceRangeType::EndDate, self.end_date.clone(), None),
-            EndKind::After => (RecurrenceRangeType::Numbered, None, Some(self.occurrences as i32)),
-        };
-
         Some(PatternedRecurrence {
             pattern: RecurrencePattern {
                 pattern_type,
@@ -207,12 +180,16 @@ impl TaskForm {
                 first_day_of_week,
                 index,
             },
+            // Microsoft To Do only supports open-ended recurrence: it ignores any
+            // range end and always stores `noEnd`. `startDate` is carried for reading
+            // tasks back, but TaskInput::to_body strips it from requests (the endpoint
+            // 400s on any Edm.Date there; it derives the start from dueDateTime).
             range: RecurrenceRange {
-                range_type,
+                range_type: RecurrenceRangeType::NoEnd,
                 start_date,
-                end_date,
-                number_of_occurrences: occ,
-                recurrence_time_zone: Some(tz.to_string()),
+                end_date: None,
+                number_of_occurrences: None,
+                recurrence_time_zone: Some("UTC".to_string()),
             },
         })
     }
@@ -247,8 +224,6 @@ impl TaskForm {
         if let Some(rec) = &task.recurrence {
             form.apply_recurrence(rec);
         }
-        // Seed the end-date calendar from any recurrence end date parsed above.
-        form.end_cal = cal_from(form.end_date.as_deref());
         form
     }
 
@@ -315,18 +290,6 @@ impl TaskForm {
         {
             self.weekdays[i] = true;
         }
-
-        match rec.range.range_type {
-            RecurrenceRangeType::NoEnd | RecurrenceRangeType::Unknown => self.end = EndKind::Never,
-            RecurrenceRangeType::EndDate => {
-                self.end = EndKind::OnDate;
-                self.end_date = rec.range.end_date.clone();
-            }
-            RecurrenceRangeType::Numbered => {
-                self.end = EndKind::After;
-                self.occurrences = rec.range.number_of_occurrences.unwrap_or(1).max(1) as u32;
-            }
-        }
     }
 }
 
@@ -348,12 +311,6 @@ pub enum FormMsg {
     NthIndex(WeekIndex),
     NthWeekday(usize),
     YearMonth(u8),
-    End(EndKind),
-    EndToggle,
-    EndDate(String),
-    EndPrevMonth,
-    EndNextMonth,
-    Occurrences(String),
     Importance(Importance),
     ReminderOn(bool),
     ReminderToggle,
@@ -391,18 +348,6 @@ impl TaskForm {
             FormMsg::NthIndex(i) => self.nth_index = i,
             FormMsg::NthWeekday(w) => self.nth_weekday = w.min(6),
             FormMsg::YearMonth(m) => self.year_month = m.clamp(1, 12),
-            FormMsg::End(e) => self.end = e,
-            FormMsg::EndToggle => self.end_open = !self.end_open,
-            FormMsg::EndDate(d) => {
-                self.end_cal = cal_from(Some(&d));
-                self.end_date = Some(d);
-                self.end_open = false;
-            }
-            FormMsg::EndPrevMonth => self.end_cal.show_prev_month(),
-            FormMsg::EndNextMonth => self.end_cal.show_next_month(),
-            FormMsg::Occurrences(s) => {
-                self.occurrences = s.parse().unwrap_or(self.occurrences).max(1)
-            }
             FormMsg::Importance(i) => self.importance = i,
             FormMsg::ReminderOn(b) => self.reminder_on = b,
             FormMsg::ReminderToggle => self.reminder_open = !self.reminder_open,
@@ -604,7 +549,7 @@ fn importance_dropdown(form: &TaskForm) -> cosmic::Element<'static, crate::app::
     cosmic::widget::dropdown(items, idx, |i| Message::Form(FormMsg::Importance(IMPORTANCES[i]))).into()
 }
 
-/// Interval + per-kind sub-controls + the "Ends" block.
+/// Interval + per-kind sub-controls.
 fn recurrence_controls(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
     use crate::app::Message;
     use cosmic::widget;
@@ -635,7 +580,6 @@ fn recurrence_controls(form: &TaskForm) -> cosmic::Element<'_, crate::app::Messa
         RepeatKind::Daily | RepeatKind::None => {}
     }
 
-    col = col.push(field_label("Ends")).push(ends_controls(form));
     col.into()
 }
 
@@ -722,67 +666,6 @@ fn monthly_controls(form: &TaskForm, yearly: bool) -> cosmic::Element<'_, crate:
                 widget::Row::new()
                     .push(index_dd)
                     .push(weekday_dd)
-                    .align_y(cosmic::iced::Alignment::Center)
-                    .spacing(8),
-            );
-        }
-    }
-    col.into()
-}
-
-/// The recurrence "Ends" block: Never / On date / After N occurrences.
-fn ends_controls(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
-    use crate::app::Message;
-    use cosmic::widget;
-
-    let radios = widget::Row::new()
-        .push(widget::radio(
-            widget::text::body("Never"),
-            EndKind::Never,
-            Some(form.end),
-            |e| Message::Form(FormMsg::End(e)),
-        ))
-        .push(widget::radio(
-            widget::text::body("On date"),
-            EndKind::OnDate,
-            Some(form.end),
-            |e| Message::Form(FormMsg::End(e)),
-        ))
-        .push(widget::radio(
-            widget::text::body("After"),
-            EndKind::After,
-            Some(form.end),
-            |e| Message::Form(FormMsg::End(e)),
-        ))
-        .align_y(cosmic::iced::Alignment::Center)
-        .spacing(12);
-
-    let mut col = widget::Column::new().push(radios).spacing(8);
-
-    match form.end {
-        EndKind::Never => {}
-        EndKind::OnDate => {
-            col = col.push(date_field(
-                form.end_date.as_deref(),
-                form.end_open,
-                &form.end_cal,
-                false,
-                FormMsg::EndToggle,
-                FormMsg::EndDate,
-                FormMsg::EndPrevMonth,
-                FormMsg::EndNextMonth,
-                None,
-            ));
-        }
-        EndKind::After => {
-            col = col.push(
-                widget::Row::new()
-                    .push(
-                        widget::text_input("1", form.occurrences.to_string())
-                            .on_input(|s| Message::Form(FormMsg::Occurrences(s)))
-                            .width(cosmic::iced::Length::Fixed(72.0)),
-                    )
-                    .push(widget::text::body("occurrence(s)"))
                     .align_y(cosmic::iced::Alignment::Center)
                     .spacing(8),
             );
@@ -931,12 +814,30 @@ mod tests {
     }
 
     #[test]
-    fn end_on_date_requires_end_date() {
+    fn recurrence_range_model_keeps_iso_start_and_utc_zone() {
+        // The model carries an ISO startDate (used internally / when reading tasks
+        // back) and a UTC zone; the request layer drops startDate/endDate.
+        let mut f = base(); // due 2026-06-20, Ends Never
+        f.repeat = RepeatKind::Daily;
+        let range = f.to_input("UTC").unwrap().recurrence.unwrap().range;
+        assert_eq!(range.start_date, "2026-06-20");
+        assert_eq!(range.end_date, None);
+        assert_eq!(range.recurrence_time_zone.as_deref(), Some("UTC"));
+    }
+
+    #[test]
+    fn recurrence_time_zone_is_always_utc() {
+        // Graph 400s on a non-UTC recurrenceTimeZone, so it must be "UTC" even when
+        // the task's due/reminder use the local zone.
         let mut f = base();
         f.repeat = RepeatKind::Daily;
-        f.end = EndKind::OnDate;
-        f.end_date = None;
-        assert!(f.to_input("UTC").is_err());
+        let rec = f.to_input("America/Sao_Paulo").unwrap().recurrence.unwrap();
+        assert_eq!(rec.range.recurrence_time_zone.as_deref(), Some("UTC"));
+        // The due date still carries the local zone.
+        assert_eq!(
+            f.to_input("America/Sao_Paulo").unwrap().due.unwrap().time_zone.as_deref(),
+            Some("America/Sao_Paulo")
+        );
     }
 
     #[test]
@@ -1037,20 +938,15 @@ mod tests {
     }
 
     #[test]
-    fn ends_map_each_variant() {
+    fn recurrence_is_always_no_end() {
+        // Microsoft To Do only supports open-ended recurrence; the form always
+        // produces a noEnd range with no end date or occurrence count.
         let mut f = base();
         f.repeat = RepeatKind::Daily;
-        assert_eq!(f.to_input("UTC").unwrap().recurrence.unwrap().range.range_type, RT::NoEnd);
-        f.end = EndKind::After;
-        f.occurrences = 5;
-        let r = f.to_input("UTC").unwrap().recurrence.unwrap().range;
-        assert_eq!(r.range_type, RT::Numbered);
-        assert_eq!(r.number_of_occurrences, Some(5));
-        f.end = EndKind::OnDate;
-        f.end_date = Some("2026-12-31".into());
-        let r = f.to_input("UTC").unwrap().recurrence.unwrap().range;
-        assert_eq!(r.range_type, RT::EndDate);
-        assert_eq!(r.end_date.as_deref(), Some("2026-12-31"));
+        let range = f.to_input("UTC").unwrap().recurrence.unwrap().range;
+        assert_eq!(range.range_type, RT::NoEnd);
+        assert_eq!(range.end_date, None);
+        assert_eq!(range.number_of_occurrences, None);
     }
 
     #[test]
@@ -1105,8 +1001,6 @@ mod tests {
         weekly.repeat = RepeatKind::Weekly;
         weekly.interval = 3;
         weekly.weekdays = [false, true, false, false, true, false, false]; // Tue, Fri
-        weekly.end = EndKind::After;
-        weekly.occurrences = 4;
         let rec = weekly.to_input("UTC").unwrap().recurrence;
 
         let task = task_with(rec.clone(), "2026-06-20");

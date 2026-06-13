@@ -198,7 +198,7 @@ impl TaskInput {
         };
 
         opt(&mut o, "dueDateTime", self.due.as_ref().map(|d| serde_json::to_value(d).unwrap()));
-        opt(&mut o, "recurrence", self.recurrence.as_ref().map(|r| serde_json::to_value(r).unwrap()));
+        opt(&mut o, "recurrence", self.recurrence.as_ref().map(recurrence_request_body));
 
         match &self.reminder {
             Some(r) => {
@@ -214,6 +214,20 @@ impl TaskInput {
         }
         Value::Object(o)
     }
+}
+
+/// Serializes a recurrence for a To Do **request**, dropping the range's
+/// `startDate`/`endDate`. The To Do endpoint returns 400 ("Invalid JSON, Error
+/// converting value ... to type 'Microsoft.OData.Edm.Date'") on any value in those
+/// fields - a service-side parser bug confirmed against the live API - so they are
+/// omitted; the service derives the recurrence start from `dueDateTime`.
+fn recurrence_request_body(r: &PatternedRecurrence) -> serde_json::Value {
+    let mut v = serde_json::to_value(r).expect("recurrence serializes");
+    if let Some(range) = v.get_mut("range").and_then(serde_json::Value::as_object_mut) {
+        range.remove("startDate");
+        range.remove("endDate");
+    }
+    v
 }
 
 /// Partial update body for completing/changing a task: `{"status":"completed"}`.
