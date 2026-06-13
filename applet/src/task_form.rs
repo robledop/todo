@@ -201,6 +201,111 @@ impl TaskForm {
             },
         })
     }
+
+    /// Pre-fills a form from an existing task (Edit mode). Unsupported recurrence
+    /// shapes fall back to RepeatKind::None.
+    pub fn from_task(task: &TodoTask) -> Self {
+        let due = task.due_date_time.as_ref().map(|d| date_part(&d.date_time));
+        let reminder_date = task.reminder_date_time.as_ref().map(|d| date_part(&d.date_time));
+        let reminder_time = task
+            .reminder_date_time
+            .as_ref()
+            .map(|d| time_part(&d.date_time))
+            .unwrap_or_else(|| "09:00".into());
+
+        let mut form = Self {
+            mode: FormMode::Edit { task_id: task.id.clone() },
+            title: task.title.clone(),
+            due,
+            importance: task.importance,
+            reminder_on: task.is_reminder_on,
+            reminder_date,
+            reminder_time,
+            ..Self::default()
+        };
+
+        if let Some(rec) = &task.recurrence {
+            form.apply_recurrence(rec);
+        }
+        form
+    }
+
+    fn apply_recurrence(&mut self, rec: &PatternedRecurrence) {
+        use RecurrencePatternType as PT;
+        // An unrecognized pattern can't be represented in the form; leave repeat None
+        // (saving the edit will then drop the unknown recurrence - acceptable for v1).
+        if rec.pattern.pattern_type == PT::Unknown {
+            self.repeat = RepeatKind::None;
+            return;
+        }
+        self.interval = rec.pattern.interval.max(1);
+        let wd_index = |name: &str| WEEKDAYS.iter().position(|w| *w == name);
+        self.weekdays = [false; 7];
+        for d in &rec.pattern.days_of_week {
+            if let Some(i) = wd_index(d) {
+                self.weekdays[i] = true;
+            }
+        }
+        if let Some(first) = rec.pattern.days_of_week.first().and_then(|d| wd_index(d)) {
+            self.nth_weekday = first;
+        }
+        if let Some(dom) = rec.pattern.day_of_month {
+            self.day_of_month = dom;
+        }
+        if let Some(m) = rec.pattern.month {
+            self.year_month = m;
+        }
+        self.nth_index = rec
+            .pattern
+            .index
+            .as_deref()
+            .and_then(index_from_str)
+            .unwrap_or(WeekIndex::First);
+
+        self.repeat = match rec.pattern.pattern_type {
+            PT::Daily => RepeatKind::Daily,
+            PT::Weekly => RepeatKind::Weekly,
+            PT::AbsoluteMonthly => {
+                self.monthly_mode = MonthlyMode::DayOfMonth;
+                RepeatKind::Monthly
+            }
+            PT::RelativeMonthly => {
+                self.monthly_mode = MonthlyMode::NthWeekday;
+                RepeatKind::Monthly
+            }
+            PT::AbsoluteYearly => {
+                self.monthly_mode = MonthlyMode::DayOfMonth;
+                RepeatKind::Yearly
+            }
+            PT::RelativeYearly => {
+                self.monthly_mode = MonthlyMode::NthWeekday;
+                RepeatKind::Yearly
+            }
+            PT::Unknown => RepeatKind::None, // unreachable (early-returned); keeps match exhaustive
+        };
+
+        // Weekly with no explicit days: mirror to_input's due-weekday default so a
+        // title-only edit doesn't silently change the schedule on save.
+        if self.repeat == RepeatKind::Weekly && !self.weekdays.iter().any(|b| *b) {
+            if let Some(due) = self.due.clone() {
+                if let Some(i) = wd_index(&due_weekday(&due)) {
+                    self.weekdays[i] = true;
+                }
+            }
+        }
+
+        match rec.range.range_type {
+            RecurrenceRangeType::NoEnd | RecurrenceRangeType::Unknown => self.end = EndKind::Never,
+            RecurrenceRangeType::EndDate => {
+                self.end = EndKind::OnDate;
+                self.end_date = rec.range.end_date.clone();
+            }
+            RecurrenceRangeType::Numbered => {
+                self.end = EndKind::After;
+                self.occurrences = rec.range.number_of_occurrences.unwrap_or(1).max(1) as u32;
+            }
+        }
+    }
 }
 
 fn day_to_dtz(day: &str, tz: &str) -> DateTimeTimeZone {
@@ -240,6 +345,25 @@ fn parse_hhmm(t: &str) -> Option<(u8, u8)> {
     let h: u8 = h.parse().ok()?;
     let m: u8 = m.parse().ok()?;
     (h < 24 && m < 60).then_some((h, m))
+}
+
+fn date_part(dt: &str) -> String {
+    dt.get(..10).unwrap_or(dt).to_string()
+}
+
+fn time_part(dt: &str) -> String {
+    dt.get(11..16).unwrap_or("09:00").to_string()
+}
+
+fn index_from_str(s: &str) -> Option<WeekIndex> {
+    Some(match s {
+        "first" => WeekIndex::First,
+        "second" => WeekIndex::Second,
+        "third" => WeekIndex::Third,
+        "fourth" => WeekIndex::Fourth,
+        "last" => WeekIndex::Last,
+        _ => return None,
+    })
 }
 
 const WEEKDAYS: [&str; 7] =
@@ -403,5 +527,93 @@ mod tests {
         let mut f = base();
         f.importance = Importance::High;
         assert_eq!(f.to_input("UTC").unwrap().importance, Importance::High);
+    }
+
+    use outlook_tasks_core::models::{
+        DateTimeTimeZone, PatternedRecurrence, RecurrencePattern, RecurrenceRange,
+    };
+
+    fn task_with(rec: Option<PatternedRecurrence>, due: &str) -> TodoTask {
+        TodoTask {
+            id: "T1".into(),
+            title: "Pay rent".into(),
+            due_date_time: Some(DateTimeTimeZone {
+                date_time: format!("{due}T00:00:00.0000000"),
+                time_zone: Some("UTC".into()),
+            }),
+            recurrence: rec,
+            ..TodoTask::default()
+        }
+    }
+
+    #[test]
+    fn from_task_prefills_basic_fields() {
+        let f = TaskForm::from_task(&task_with(None, "2026-06-20"));
+        assert_eq!(f.mode, FormMode::Edit { task_id: "T1".into() });
+        assert_eq!(f.title, "Pay rent");
+        assert_eq!(f.due.as_deref(), Some("2026-06-20"));
+        assert_eq!(f.repeat, RepeatKind::None);
+    }
+
+    #[test]
+    fn from_task_then_to_input_roundtrips_weekly() {
+        let mut weekly = base();
+        weekly.repeat = RepeatKind::Weekly;
+        weekly.interval = 3;
+        weekly.weekdays = [false, true, false, false, true, false, false]; // Tue, Fri
+        weekly.end = EndKind::After;
+        weekly.occurrences = 4;
+        let rec = weekly.to_input("UTC").unwrap().recurrence;
+
+        let task = task_with(rec.clone(), "2026-06-20");
+        let form = TaskForm::from_task(&task);
+        let rec2 = form.to_input("UTC").unwrap().recurrence;
+        assert_eq!(rec, rec2); // schedule preserved through edit
+    }
+
+    #[test]
+    fn from_task_then_to_input_roundtrips_monthly_and_yearly() {
+        for (repeat, mode) in [
+            (RepeatKind::Monthly, MonthlyMode::DayOfMonth),
+            (RepeatKind::Monthly, MonthlyMode::NthWeekday),
+            (RepeatKind::Yearly, MonthlyMode::DayOfMonth),
+            (RepeatKind::Yearly, MonthlyMode::NthWeekday),
+        ] {
+            let mut src = base();
+            src.repeat = repeat;
+            src.monthly_mode = mode;
+            src.day_of_month = 12;
+            src.year_month = 4;
+            src.nth_index = WeekIndex::Second;
+            src.nth_weekday = 2; // Wednesday
+            let rec = src.to_input("UTC").unwrap().recurrence;
+            let form = TaskForm::from_task(&task_with(rec.clone(), "2026-06-20"));
+            assert_eq!(rec, form.to_input("UTC").unwrap().recurrence, "{repeat:?}/{mode:?}");
+        }
+    }
+
+    #[test]
+    fn from_task_unknown_pattern_falls_back_to_none() {
+        use outlook_tasks_core::models::{RecurrencePatternType, RecurrenceRangeType};
+        let rec = PatternedRecurrence {
+            pattern: RecurrencePattern {
+                pattern_type: RecurrencePatternType::Unknown,
+                interval: 1,
+                month: None,
+                day_of_month: None,
+                days_of_week: vec![],
+                first_day_of_week: None,
+                index: None,
+            },
+            range: RecurrenceRange {
+                range_type: RecurrenceRangeType::NoEnd,
+                start_date: "2026-06-20".into(),
+                end_date: None,
+                number_of_occurrences: None,
+                recurrence_time_zone: None,
+            },
+        };
+        let form = TaskForm::from_task(&task_with(Some(rec), "2026-06-20"));
+        assert_eq!(form.repeat, RepeatKind::None);
     }
 }
