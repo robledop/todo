@@ -16,6 +16,8 @@ env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
 # Already in the build tree via libcosmic; used for today's date and due-date formatting.
 chrono = "0.4"
+# The libcosmic calendar widget's date type.
+jiff = "0.2"
 
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"

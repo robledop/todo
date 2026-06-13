@@ -27,7 +27,7 @@ pub enum MonthlyMode {
     NthWeekday,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EndKind {
     #[default]
     Never,
@@ -58,6 +58,15 @@ pub struct TaskForm {
     pub reminder_date: Option<String>, // YYYY-MM-DD
     pub reminder_time: String,         // HH:MM
     pub error: Option<String>,
+
+    // View-only picker state (not part of to_input/from_task), but it participates
+    // in PartialEq/Eq - fine, CalendarModel is Eq.
+    pub due_open: bool,
+    pub due_cal: cosmic::widget::calendar::CalendarModel,
+    pub end_open: bool,
+    pub end_cal: cosmic::widget::calendar::CalendarModel,
+    pub reminder_open: bool,
+    pub reminder_cal: cosmic::widget::calendar::CalendarModel,
 }
 
 impl Default for TaskForm {
@@ -82,6 +91,12 @@ impl Default for TaskForm {
             reminder_date: None,
             reminder_time: "09:00".into(),
             error: None,
+            due_open: false,
+            due_cal: cosmic::widget::calendar::CalendarModel::now(),
+            end_open: false,
+            end_cal: cosmic::widget::calendar::CalendarModel::now(),
+            reminder_open: false,
+            reminder_cal: cosmic::widget::calendar::CalendarModel::now(),
         }
     }
 }
@@ -213,6 +228,9 @@ impl TaskForm {
             .map(|d| time_part(&d.date_time))
             .unwrap_or_else(|| "09:00".into());
 
+        let due_cal = cal_from(due.as_deref());
+        let reminder_cal = cal_from(reminder_date.as_deref());
+
         let mut form = Self {
             mode: FormMode::Edit { task_id: task.id.clone() },
             title: task.title.clone(),
@@ -221,12 +239,16 @@ impl TaskForm {
             reminder_on: task.is_reminder_on,
             reminder_date,
             reminder_time,
+            due_cal,
+            reminder_cal,
             ..Self::default()
         };
 
         if let Some(rec) = &task.recurrence {
             form.apply_recurrence(rec);
         }
+        // Seed the end-date calendar from any recurrence end date parsed above.
+        form.end_cal = cal_from(form.end_date.as_deref());
         form
     }
 
@@ -308,9 +330,487 @@ impl TaskForm {
     }
 }
 
-/// Placeholder form view; full field rendering is not implemented yet.
-pub fn form_view(_form: &TaskForm) -> cosmic::Element<'static, crate::app::Message> {
-    cosmic::widget::text::body("Task form").into()
+/// A field edit emitted by the form view. Routed through `Message::Form` to keep
+/// the app-level `Message` enum flat.
+#[derive(Debug, Clone)]
+pub enum FormMsg {
+    Title(String),
+    DueToggle,         // open/close the due calendar popover
+    DuePicked(String), // YYYY-MM-DD (from calendar on_select)
+    DuePrevMonth,
+    DueNextMonth,
+    DueCleared,
+    Repeat(RepeatKind),
+    Interval(String),
+    Weekday(usize, bool),
+    MonthlyMode(MonthlyMode),
+    DayOfMonth(String),
+    NthIndex(WeekIndex),
+    NthWeekday(usize),
+    YearMonth(u8),
+    End(EndKind),
+    EndToggle,
+    EndDate(String),
+    EndPrevMonth,
+    EndNextMonth,
+    Occurrences(String),
+    Importance(Importance),
+    ReminderOn(bool),
+    ReminderToggle,
+    ReminderDate(String),
+    ReminderPrevMonth,
+    ReminderNextMonth,
+    ReminderTime(String),
+}
+
+impl TaskForm {
+    /// Applies a field edit to the form (pure).
+    pub fn apply(&mut self, msg: FormMsg) {
+        match msg {
+            FormMsg::Title(s) => self.title = s,
+            FormMsg::DueToggle => self.due_open = !self.due_open,
+            FormMsg::DuePicked(d) => {
+                self.due_cal = cal_from(Some(&d));
+                self.due = Some(d);
+                self.due_open = false;
+            }
+            FormMsg::DuePrevMonth => self.due_cal.show_prev_month(),
+            FormMsg::DueNextMonth => self.due_cal.show_next_month(),
+            FormMsg::DueCleared => self.due = None,
+            FormMsg::Repeat(r) => self.repeat = r,
+            FormMsg::Interval(s) => self.interval = s.parse().unwrap_or(self.interval).max(1),
+            FormMsg::Weekday(i, on) => {
+                if i < 7 {
+                    self.weekdays[i] = on;
+                }
+            }
+            FormMsg::MonthlyMode(m) => self.monthly_mode = m,
+            FormMsg::DayOfMonth(s) => {
+                self.day_of_month = s.parse().unwrap_or(self.day_of_month).clamp(1, 31);
+            }
+            FormMsg::NthIndex(i) => self.nth_index = i,
+            FormMsg::NthWeekday(w) => self.nth_weekday = w.min(6),
+            FormMsg::YearMonth(m) => self.year_month = m.clamp(1, 12),
+            FormMsg::End(e) => self.end = e,
+            FormMsg::EndToggle => self.end_open = !self.end_open,
+            FormMsg::EndDate(d) => {
+                self.end_cal = cal_from(Some(&d));
+                self.end_date = Some(d);
+                self.end_open = false;
+            }
+            FormMsg::EndPrevMonth => self.end_cal.show_prev_month(),
+            FormMsg::EndNextMonth => self.end_cal.show_next_month(),
+            FormMsg::Occurrences(s) => {
+                self.occurrences = s.parse().unwrap_or(self.occurrences).max(1)
+            }
+            FormMsg::Importance(i) => self.importance = i,
+            FormMsg::ReminderOn(b) => self.reminder_on = b,
+            FormMsg::ReminderToggle => self.reminder_open = !self.reminder_open,
+            FormMsg::ReminderDate(d) => {
+                self.reminder_cal = cal_from(Some(&d));
+                self.reminder_date = Some(d);
+                self.reminder_open = false;
+            }
+            FormMsg::ReminderPrevMonth => self.reminder_cal.show_prev_month(),
+            FormMsg::ReminderNextMonth => self.reminder_cal.show_next_month(),
+            FormMsg::ReminderTime(t) => self.reminder_time = t,
+        }
+    }
+}
+
+/// Maps a `RepeatKind` to/from a dropdown index.
+const REPEATS: [RepeatKind; 5] = [
+    RepeatKind::None,
+    RepeatKind::Daily,
+    RepeatKind::Weekly,
+    RepeatKind::Monthly,
+    RepeatKind::Yearly,
+];
+
+/// Maps an `Importance` to/from a dropdown index.
+const IMPORTANCES: [Importance; 3] = [Importance::Low, Importance::Normal, Importance::High];
+
+/// Month names for the yearly-month dropdown (index 0 == January).
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// Short weekday labels for the weekly toggles and nth-weekday dropdown
+/// (index 0 == Monday, mirroring `TaskForm::weekdays`).
+const WEEKDAY_LABELS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+const INDEX_LABELS: [&str; 5] = ["First", "Second", "Third", "Fourth", "Last"];
+
+/// Renders the create/edit form. All field edits route through
+/// `Message::Form(FormMsg::...)`; Cancel returns to the list. The Save button is
+/// not wired up yet - this view shows Cancel and a validity hint only.
+pub fn form_view(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
+    use crate::app::Message;
+    use cosmic::widget;
+
+    let title_label = match &form.mode {
+        FormMode::Create => "New task",
+        FormMode::Edit { .. } => "Edit task",
+    };
+
+    let title_input = widget::text_input("Title", &form.title)
+        .on_input(|s| Message::Form(FormMsg::Title(s)));
+
+    let mut col = widget::Column::new()
+        .push(widget::text::title4(title_label))
+        .push(field_label("Title"))
+        .push(title_input)
+        .push(field_label("Due"))
+        .push(date_field(
+            form.due.as_deref(),
+            form.due_open,
+            &form.due_cal,
+            true,
+            FormMsg::DueToggle,
+            FormMsg::DuePicked,
+            FormMsg::DuePrevMonth,
+            FormMsg::DueNextMonth,
+            Some(FormMsg::DueCleared),
+        ))
+        .push(field_label("Repeat"))
+        .push(repeat_dropdown(form));
+
+    if form.repeat != RepeatKind::None {
+        col = col.push(recurrence_controls(form));
+    }
+
+    col = col
+        .push(field_label("Importance"))
+        .push(importance_dropdown(form))
+        .push(reminder_controls(form));
+
+    // Validity hint (timezone-independent): show the first blocking error, if any.
+    if let Some(err) = form.to_input("UTC").err() {
+        col = col.push(error_caption(err));
+    }
+    // Surface a save error from a previous attempt.
+    if let Some(err) = &form.error {
+        col = col.push(error_caption(err));
+    }
+
+    let footer = widget::Row::new()
+        .push(widget::space::horizontal())
+        .push(widget::button::text("Cancel").on_press(Message::CancelForm))
+        .align_y(cosmic::iced::Alignment::Center)
+        .spacing(8);
+
+    col = col.push(footer);
+
+    widget::scrollable(col.spacing(8).padding(12))
+        .height(cosmic::iced::Length::Fixed(420.0))
+        .into()
+}
+
+fn field_label(text: &str) -> cosmic::Element<'static, crate::app::Message> {
+    cosmic::widget::text::caption(text.to_string()).into()
+}
+
+fn error_caption(text: &str) -> cosmic::Element<'static, crate::app::Message> {
+    cosmic::widget::text::caption(text.to_string())
+        .class(cosmic::theme::Text::Color(cosmic::iced::Color::from_rgb(0.8, 0.2, 0.2)))
+        .into()
+}
+
+/// A date button that opens a calendar popover. `clearable` adds a "Clear"
+/// button (used by the optional due date).
+#[allow(clippy::too_many_arguments)]
+fn date_field<'a>(
+    value: Option<&str>,
+    open: bool,
+    model: &'a cosmic::widget::calendar::CalendarModel,
+    clearable: bool,
+    toggle: FormMsg,
+    picked: fn(String) -> FormMsg,
+    prev: FormMsg,
+    next: FormMsg,
+    clear: Option<FormMsg>,
+) -> cosmic::Element<'a, crate::app::Message> {
+    use crate::app::Message;
+    use cosmic::widget;
+
+    let label = value.map(str::to_string).unwrap_or_else(|| "None".to_string());
+    let button = widget::button::standard(label).on_press(Message::Form(toggle.clone()));
+
+    let trigger: cosmic::Element<'a, Message> = if open {
+        let cal = widget::calendar(
+            model,
+            move |d| Message::Form(picked(d.to_string())),
+            move || Message::Form(prev.clone()),
+            move || Message::Form(next.clone()),
+            jiff::civil::Weekday::Sunday,
+        );
+        widget::popover(button)
+            .popup(cal)
+            .on_close(Message::Form(toggle))
+            .into()
+    } else {
+        button.into()
+    };
+
+    let mut row = widget::Row::new().push(trigger).align_y(cosmic::iced::Alignment::Center).spacing(8);
+    if let Some(clear) = clear
+        && clearable
+        && value.is_some()
+    {
+        row = row.push(widget::button::text("Clear").on_press(Message::Form(clear)));
+    }
+    row.into()
+}
+
+fn repeat_dropdown(form: &TaskForm) -> cosmic::Element<'static, crate::app::Message> {
+    use crate::app::Message;
+    let items: Vec<&'static str> = vec!["None", "Daily", "Weekly", "Monthly", "Yearly"];
+    let idx = REPEATS.iter().position(|r| *r == form.repeat);
+    cosmic::widget::dropdown(items, idx, |i| Message::Form(FormMsg::Repeat(REPEATS[i]))).into()
+}
+
+fn importance_dropdown(form: &TaskForm) -> cosmic::Element<'static, crate::app::Message> {
+    use crate::app::Message;
+    let items: Vec<&'static str> = vec!["Low", "Normal", "High"];
+    let idx = IMPORTANCES.iter().position(|i| *i == form.importance);
+    cosmic::widget::dropdown(items, idx, |i| Message::Form(FormMsg::Importance(IMPORTANCES[i]))).into()
+}
+
+/// Interval + per-kind sub-controls + the "Ends" block.
+fn recurrence_controls(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
+    use crate::app::Message;
+    use cosmic::widget;
+
+    let interval = widget::Row::new()
+        .push(widget::text::body("Every"))
+        .push(
+            widget::text_input("1", form.interval.to_string())
+                .on_input(|s| Message::Form(FormMsg::Interval(s)))
+                .width(cosmic::iced::Length::Fixed(64.0)),
+        )
+        .push(widget::text::body(match form.repeat {
+            RepeatKind::Daily => "day(s)",
+            RepeatKind::Weekly => "week(s)",
+            RepeatKind::Monthly => "month(s)",
+            RepeatKind::Yearly => "year(s)",
+            RepeatKind::None => "",
+        }))
+        .align_y(cosmic::iced::Alignment::Center)
+        .spacing(8);
+
+    let mut col = widget::Column::new().push(interval).spacing(8);
+
+    match form.repeat {
+        RepeatKind::Weekly => col = col.push(weekday_toggles(form)),
+        RepeatKind::Monthly => col = col.push(monthly_controls(form, false)),
+        RepeatKind::Yearly => col = col.push(monthly_controls(form, true)),
+        RepeatKind::Daily | RepeatKind::None => {}
+    }
+
+    col = col.push(field_label("Ends")).push(ends_controls(form));
+    col.into()
+}
+
+fn weekday_toggles(form: &TaskForm) -> cosmic::Element<'static, crate::app::Message> {
+    use crate::app::Message;
+    use cosmic::widget;
+
+    let mut row = widget::Row::new().align_y(cosmic::iced::Alignment::Center).spacing(4);
+    for (i, label) in WEEKDAY_LABELS.iter().enumerate() {
+        let on = form.weekdays[i];
+        let mut btn = widget::button::text(label.to_string())
+            .on_press(Message::Form(FormMsg::Weekday(i, !on)));
+        if on {
+            btn = btn.class(cosmic::theme::Button::Suggested);
+        }
+        row = row.push(btn);
+    }
+    row.into()
+}
+
+/// Day-of-month vs nth-weekday radios with the matching sub-control; `yearly`
+/// adds a month dropdown.
+fn monthly_controls(form: &TaskForm, yearly: bool) -> cosmic::Element<'_, crate::app::Message> {
+    use crate::app::Message;
+    use cosmic::widget;
+
+    let mode_radios = widget::Row::new()
+        .push(widget::radio(
+            widget::text::body("Day of month"),
+            MonthlyMode::DayOfMonth,
+            Some(form.monthly_mode),
+            |m| Message::Form(FormMsg::MonthlyMode(m)),
+        ))
+        .push(widget::radio(
+            widget::text::body("Nth weekday"),
+            MonthlyMode::NthWeekday,
+            Some(form.monthly_mode),
+            |m| Message::Form(FormMsg::MonthlyMode(m)),
+        ))
+        .align_y(cosmic::iced::Alignment::Center)
+        .spacing(12);
+
+    let mut col = widget::Column::new().push(mode_radios).spacing(8);
+
+    if yearly {
+        let month_idx = (form.year_month.clamp(1, 12) - 1) as usize;
+        let months: Vec<&'static str> = MONTHS.to_vec();
+        let month_dd = widget::dropdown(months, Some(month_idx), |i| {
+            Message::Form(FormMsg::YearMonth((i as u8) + 1))
+        });
+        col = col.push(widget::Row::new()
+            .push(widget::text::body("Month"))
+            .push(month_dd)
+            .align_y(cosmic::iced::Alignment::Center)
+            .spacing(8));
+    }
+
+    match form.monthly_mode {
+        MonthlyMode::DayOfMonth => {
+            col = col.push(
+                widget::Row::new()
+                    .push(widget::text::body("Day"))
+                    .push(
+                        widget::text_input("1", form.day_of_month.to_string())
+                            .on_input(|s| Message::Form(FormMsg::DayOfMonth(s)))
+                            .width(cosmic::iced::Length::Fixed(64.0)),
+                    )
+                    .align_y(cosmic::iced::Alignment::Center)
+                    .spacing(8),
+            );
+        }
+        MonthlyMode::NthWeekday => {
+            let index_items: Vec<&'static str> = INDEX_LABELS.to_vec();
+            let index_idx = INDEXES.iter().position(|i| *i == form.nth_index);
+            let index_dd = widget::dropdown(index_items, index_idx, |i| {
+                Message::Form(FormMsg::NthIndex(INDEXES[i]))
+            });
+            let weekday_items: Vec<&'static str> = WEEKDAY_LABELS.to_vec();
+            let weekday_idx = Some(form.nth_weekday.min(6));
+            let weekday_dd = widget::dropdown(weekday_items, weekday_idx, |i| {
+                Message::Form(FormMsg::NthWeekday(i))
+            });
+            col = col.push(
+                widget::Row::new()
+                    .push(index_dd)
+                    .push(weekday_dd)
+                    .align_y(cosmic::iced::Alignment::Center)
+                    .spacing(8),
+            );
+        }
+    }
+    col.into()
+}
+
+/// The recurrence "Ends" block: Never / On date / After N occurrences.
+fn ends_controls(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
+    use crate::app::Message;
+    use cosmic::widget;
+
+    let radios = widget::Row::new()
+        .push(widget::radio(
+            widget::text::body("Never"),
+            EndKind::Never,
+            Some(form.end),
+            |e| Message::Form(FormMsg::End(e)),
+        ))
+        .push(widget::radio(
+            widget::text::body("On date"),
+            EndKind::OnDate,
+            Some(form.end),
+            |e| Message::Form(FormMsg::End(e)),
+        ))
+        .push(widget::radio(
+            widget::text::body("After"),
+            EndKind::After,
+            Some(form.end),
+            |e| Message::Form(FormMsg::End(e)),
+        ))
+        .align_y(cosmic::iced::Alignment::Center)
+        .spacing(12);
+
+    let mut col = widget::Column::new().push(radios).spacing(8);
+
+    match form.end {
+        EndKind::Never => {}
+        EndKind::OnDate => {
+            col = col.push(date_field(
+                form.end_date.as_deref(),
+                form.end_open,
+                &form.end_cal,
+                false,
+                FormMsg::EndToggle,
+                FormMsg::EndDate,
+                FormMsg::EndPrevMonth,
+                FormMsg::EndNextMonth,
+                None,
+            ));
+        }
+        EndKind::After => {
+            col = col.push(
+                widget::Row::new()
+                    .push(
+                        widget::text_input("1", form.occurrences.to_string())
+                            .on_input(|s| Message::Form(FormMsg::Occurrences(s)))
+                            .width(cosmic::iced::Length::Fixed(72.0)),
+                    )
+                    .push(widget::text::body("occurrence(s)"))
+                    .align_y(cosmic::iced::Alignment::Center)
+                    .spacing(8),
+            );
+        }
+    }
+    col.into()
+}
+
+/// Reminder toggler with a date popover and an HH:MM time input.
+fn reminder_controls(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
+    use crate::app::Message;
+    use cosmic::widget;
+
+    let toggle = widget::toggler(form.reminder_on)
+        .label("Remind me".to_string())
+        .on_toggle(|b| Message::Form(FormMsg::ReminderOn(b)));
+
+    let mut col = widget::Column::new().push(toggle).spacing(8);
+
+    if form.reminder_on {
+        col = col
+            .push(date_field(
+                form.reminder_date.as_deref(),
+                form.reminder_open,
+                &form.reminder_cal,
+                false,
+                FormMsg::ReminderToggle,
+                FormMsg::ReminderDate,
+                FormMsg::ReminderPrevMonth,
+                FormMsg::ReminderNextMonth,
+                None,
+            ))
+            .push(
+                widget::Row::new()
+                    .push(widget::text::body("Time"))
+                    .push(
+                        widget::text_input("09:00", &form.reminder_time)
+                            .on_input(|s| Message::Form(FormMsg::ReminderTime(s)))
+                            .width(cosmic::iced::Length::Fixed(96.0)),
+                    )
+                    .align_y(cosmic::iced::Alignment::Center)
+                    .spacing(8),
+            );
+    }
+    col.into()
 }
 
 fn day_to_dtz(day: &str, tz: &str) -> DateTimeTimeZone {
@@ -369,6 +869,15 @@ fn index_from_str(s: &str) -> Option<WeekIndex> {
         "last" => WeekIndex::Last,
         _ => return None,
     })
+}
+
+/// A `CalendarModel` selected/visible at the given `YYYY-MM-DD`, or today if the
+/// day is absent or unparsable.
+fn cal_from(day: Option<&str>) -> cosmic::widget::calendar::CalendarModel {
+    let d = day
+        .and_then(|s| s.parse::<jiff::civil::Date>().ok())
+        .unwrap_or_else(|| jiff::Zoned::now().date());
+    cosmic::widget::calendar::CalendarModel::new(d, d)
 }
 
 const WEEKDAYS: [&str; 7] =
@@ -532,6 +1041,19 @@ mod tests {
         let mut f = base();
         f.importance = Importance::High;
         assert_eq!(f.to_input("UTC").unwrap().importance, Importance::High);
+    }
+
+    #[test]
+    fn apply_edits_fields() {
+        let mut f = TaskForm::create();
+        f.apply(FormMsg::Title("Hi".into()));
+        f.apply(FormMsg::Repeat(RepeatKind::Weekly));
+        f.apply(FormMsg::Weekday(2, true));
+        f.apply(FormMsg::Interval("3".into()));
+        assert_eq!(f.title, "Hi");
+        assert_eq!(f.repeat, RepeatKind::Weekly);
+        assert!(f.weekdays[2]);
+        assert_eq!(f.interval, 3);
     }
 
     use outlook_tasks_core::models::{

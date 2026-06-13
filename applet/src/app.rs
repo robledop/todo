@@ -93,6 +93,7 @@ pub enum Message {
     OpenCreate,
     OpenEdit(String),
     CancelForm,
+    Form(crate::task_form::FormMsg),
     ShowCompleted(bool),
     Retry,
 }
@@ -411,6 +412,13 @@ impl cosmic::Application for AppModel {
             Message::CancelForm => {
                 if let AppState::Ready(ready) = &mut self.state {
                     ready.view = PopupView::List;
+                }
+            }
+            Message::Form(fmsg) => {
+                if let AppState::Ready(ready) = &mut self.state
+                    && let PopupView::Form(form) = &mut ready.view
+                {
+                    form.apply(fmsg);
                 }
             }
         }
