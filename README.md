@@ -36,9 +36,3 @@ sudo just install
 ```
 
 Then add "Outlook Tasks" to the panel via COSMIC Settings -> Panel/Dock -> Applets.
-
-## Scope (v1)
-
-View tasks in any list, switch lists, complete tasks, add tasks. Background poll
-every 5 minutes with an open-task count in the popup. Not yet: delete, edit,
-due dates, reminders, subtasks, work/school accounts.
