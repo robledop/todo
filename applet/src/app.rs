@@ -546,21 +546,6 @@ impl AppModel {
             .padding(cosmic::iced::Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 0.0 });
         for task in &visible {
             let id = task.id.clone();
-            // A row pending delete confirmation shows a prompt instead of the task.
-            if ready.confirming_delete.as_deref() == Some(task.id.as_str()) {
-                let confirm = widget::Row::new()
-                    .push(widget::text::body(format!("Delete \u{201c}{}\u{201d}?", task.title)))
-                    .push(widget::space::horizontal())
-                    .push(
-                        widget::button::destructive("Delete")
-                            .on_press(Message::DeleteConfirmed(id.clone())),
-                    )
-                    .push(widget::button::text("Cancel").on_press(Message::DeleteCancelled))
-                    .align_y(Alignment::Center)
-                    .spacing(8);
-                list = list.push(confirm);
-                continue;
-            }
             let checked = task.status == TaskStatus::Completed;
             let edit_id = id.clone();
             let mut row = widget::Row::new()
@@ -601,15 +586,36 @@ impl AppModel {
                 }
                 row = row.push(due_label);
             }
-            // No trash on a not-yet-created (temp-) row.
+            // Trailing control. A not-yet-created (temp-) row has no server id,
+            // so it gets neither trash nor confirm. A row pending delete swaps the
+            // trash icon for an explicit Delete plus a cancel "x"; the title above
+            // keeps its ellipsis/Fill, so these stay pinned and visible no matter
+            // how long the title is.
             if !Ready::is_placeholder(&task.id) {
-                let delete = widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
-                    .on_press(Message::DeleteRequested(id.clone()));
-                row = row.push(widget::tooltip(
-                    delete,
-                    widget::text::body("Delete task"),
-                    widget::tooltip::Position::Top,
-                ));
+                if ready.confirming_delete.as_deref() == Some(task.id.as_str()) {
+                    row = row
+                        .push(
+                            widget::button::destructive("Delete")
+                                .on_press(Message::DeleteConfirmed(id.clone())),
+                        )
+                        .push(widget::tooltip(
+                            widget::button::icon(widget::icon::from_name(
+                                "window-close-symbolic",
+                            ))
+                            .on_press(Message::DeleteCancelled),
+                            widget::text::body("Cancel"),
+                            widget::tooltip::Position::Top,
+                        ));
+                } else {
+                    let delete =
+                        widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
+                            .on_press(Message::DeleteRequested(id.clone()));
+                    row = row.push(widget::tooltip(
+                        delete,
+                        widget::text::body("Delete task"),
+                        widget::tooltip::Position::Top,
+                    ));
+                }
             }
             list = list.push(row);
         }
