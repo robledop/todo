@@ -1,5 +1,5 @@
 name := "cosmic-applet-outlook-tasks"
-appid := "dev.robledo.OutlookTasks"
+appid := "dev.robledop.OutlookTasks"
 prefix := "/usr"
 
 bin-src := "target/release/" + name
