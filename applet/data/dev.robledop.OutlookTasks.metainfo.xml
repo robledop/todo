@@ -2,7 +2,7 @@
 <component type="addon">
   <id>dev.robledop.OutlookTasks</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>GPL-2.0-only</project_license>
+  <project_license>GPL-3.0-only</project_license>
   <name>Outlook Tasks</name>
   <summary>Manage outlook.com tasks from the COSMIC panel</summary>
   <description>
