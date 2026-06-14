@@ -36,25 +36,42 @@ impl GraphClient {
         self.collect_pages(format!("{}/me/todo/lists", self.base_url)).await
     }
 
-    /// Lists all tasks in a list, following `@odata.nextLink` pages. Trims the
-    /// payload with `$select=id,title,status`.
-    /// Lists tasks in a list. When `include_completed` is false, asks the server
-    /// for only not-completed tasks (`$filter=status ne 'completed'`), which is
-    /// far faster than paging through every completed task. No `$select`: the
-    /// To Do tasks endpoint rejects it with 400 RequestBroker--ParseUri.
-    pub async fn list_tasks(
+    /// Fetches ALL pending (not-completed) tasks (`$filter=status ne 'completed'`),
+    /// following pages. Pending is the always-visible list, so it is returned
+    /// complete; it is small relative to completed history. No `$select`: the To Do
+    /// tasks endpoint rejects it with 400 RequestBroker--ParseUri.
+    pub async fn list_pending(&self, list_id: &str) -> Result<Vec<TodoTask>, GraphError> {
+        let url = format!(
+            "{}/me/todo/lists/{}/tasks?$filter=status%20ne%20%27completed%27",
+            self.base_url,
+            seg(list_id),
+        );
+        self.collect_pages(url).await
+    }
+
+    /// Fetches the first page of completed tasks, newest-due first
+    /// (`$filter=status eq 'completed'` + `$orderby=dueDateTime/dateTime desc`),
+    /// plus a validated `@odata.nextLink` for "load more". Completed history can be
+    /// large, so it is paged rather than fetched all at once.
+    pub async fn list_completed_page(
         &self,
         list_id: &str,
-        include_completed: bool,
-    ) -> Result<Vec<TodoTask>, GraphError> {
-        let path = format!("{}/me/todo/lists/{}/tasks", self.base_url, seg(list_id));
-        let url = if include_completed {
-            path
-        } else {
-            // `$filter=status ne 'completed'`, with spaces and quotes encoded.
-            format!("{path}?$filter=status%20ne%20%27completed%27")
-        };
-        self.collect_pages(url).await
+    ) -> Result<(Vec<TodoTask>, Option<String>), GraphError> {
+        let url = format!(
+            "{}/me/todo/lists/{}/tasks?$filter=status%20eq%20%27completed%27&$orderby=dueDateTime/dateTime%20desc",
+            self.base_url,
+            seg(list_id),
+        );
+        self.fetch_tasks_page(url).await
+    }
+
+    /// Fetches a subsequent tasks page from an `@odata.nextLink` produced by
+    /// `list_completed_page` (already origin-checked when it was returned).
+    pub async fn list_tasks_page(
+        &self,
+        next_link: &str,
+    ) -> Result<(Vec<TodoTask>, Option<String>), GraphError> {
+        self.fetch_tasks_page(next_link.to_string()).await
     }
 
     /// Creates a task in a list from the given input.
@@ -98,6 +115,18 @@ impl GraphClient {
             format!("{}/me/todo/lists/{}/tasks/{}", self.base_url, seg(list_id), seg(task_id));
         self.execute(Method::DELETE, &url, None).await?;
         Ok(())
+    }
+
+    /// GETs a single tasks page: its items plus an origin-validated
+    /// `@odata.nextLink` (dropped if it points off the Graph origin, so the bearer
+    /// token is never sent to a forged host).
+    async fn fetch_tasks_page(
+        &self,
+        url: String,
+    ) -> Result<(Vec<TodoTask>, Option<String>), GraphError> {
+        let page: GraphCollection<TodoTask> = self.get_json(&url).await?;
+        let next = page.next_link.filter(|n| same_graph_origin(&self.base_url, n));
+        Ok((page.value, next))
     }
 
     /// GETs every page of an OData collection, following `@odata.nextLink`.

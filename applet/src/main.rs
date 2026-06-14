@@ -1,6 +1,8 @@
 mod app;
 mod config;
 mod consts;
+mod notify;
+mod reminders;
 mod state;
 mod task_form;
 

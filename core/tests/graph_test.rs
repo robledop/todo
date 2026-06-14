@@ -61,7 +61,7 @@ async fn rejects_next_link_to_foreign_origin() {
 }
 
 #[tokio::test]
-async fn list_tasks_follows_next_link() {
+async fn list_completed_page_then_loads_more() {
     let server = MockServer::start().await;
     let page2 = format!("{}/me/todo/lists/L1/tasks-page2", server.uri());
 
@@ -91,10 +91,40 @@ async fn list_tasks_follows_next_link() {
         std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
     );
 
-    let tasks = client.list_tasks("L1", true).await.unwrap();
-    assert_eq!(tasks.len(), 2);
-    assert_eq!(tasks[0].id, "T1");
-    assert_eq!(tasks[1].title, "Second");
+    // First completed page returns one task and the next link; no auto-follow.
+    let (page1, next) = client.list_completed_page("L1").await.unwrap();
+    assert_eq!(page1.len(), 1);
+    assert_eq!(page1[0].id, "T1");
+    assert_eq!(next.as_deref(), Some(page2.as_str()));
+
+    // "Load more" follows the next link to the second page.
+    let (page2_tasks, next2) = client.list_tasks_page(&next.unwrap()).await.unwrap();
+    assert_eq!(page2_tasks.len(), 1);
+    assert_eq!(page2_tasks[0].title, "Second");
+    assert!(next2.is_none());
+}
+
+#[tokio::test]
+async fn list_completed_drops_foreign_origin_next_link() {
+    // A forged nextLink pointing off the Graph origin must be dropped so the
+    // bearer token is never sent there.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists/L1/tasks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [ { "id": "T1", "title": "First", "status": "notStarted" } ],
+            "@odata.nextLink": "https://evil.example.com/me/todo/lists/L1/tasks-page2"
+        })))
+        .mount(&server)
+        .await;
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
+    );
+    let (tasks, next) = client.list_completed_page("L1").await.unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert!(next.is_none(), "foreign-origin nextLink must be dropped");
 }
 
 use outlook_tasks_core::models::TaskStatus;
@@ -245,21 +275,23 @@ async fn throttled_reads_retry_after() {
     assert!(matches!(err, GraphError::Throttled { retry_after: Some(d) } if d == Duration::from_secs(30)));
 }
 
-struct NoQuery;
-impl wiremock::Match for NoQuery {
+struct NoSelect;
+impl wiremock::Match for NoSelect {
     fn matches(&self, request: &wiremock::Request) -> bool {
-        request.url.query().is_none()
+        !request.url.query_pairs().any(|(k, _)| k == "$select")
     }
 }
 
 #[tokio::test]
-async fn list_tasks_omits_select_query() {
-    // Microsoft To Do rejects `$select` on the tasks endpoint with
-    // 400 RequestBroker--ParseUri, so the client must request bare tasks.
+async fn list_completed_filters_orders_and_omits_select() {
+    // Completed is filtered + ordered by due date (newest first), never `$select`,
+    // which To Do rejects with 400 RequestBroker--ParseUri.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/me/todo/lists/L1/tasks"))
-        .and(NoQuery)
+        .and(query_param("$filter", "status eq 'completed'"))
+        .and(query_param("$orderby", "dueDateTime/dateTime desc"))
+        .and(NoSelect)
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
         .expect(1)
         .mount(&server)
@@ -269,12 +301,12 @@ async fn list_tasks_omits_select_query() {
         reqwest::Client::new(),
         std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
     );
-    let tasks = client.list_tasks("L1", true).await.unwrap();
+    let (tasks, _next) = client.list_completed_page("L1").await.unwrap();
     assert!(tasks.is_empty());
 }
 
 #[tokio::test]
-async fn list_tasks_pending_only_filters_server_side() {
+async fn list_pending_filters_server_side() {
     // Without completed, the client asks the server to filter, which is much
     // faster than paging every completed task. To Do supports this $filter.
     let server = MockServer::start().await;
@@ -292,7 +324,7 @@ async fn list_tasks_pending_only_filters_server_side() {
         reqwest::Client::new(),
         std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
     );
-    let tasks = client.list_tasks("L1", false).await.unwrap();
+    let tasks = client.list_pending("L1").await.unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].id, "T1");
 }

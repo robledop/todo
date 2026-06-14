@@ -32,11 +32,18 @@ pub struct Ready {
     pub lists: Vec<TodoList>,
     pub selected_list_id: String,
     pub tasks: Vec<TodoTask>,
-    pub add_input: String,
     pub error: Option<String>,
     pub loading: bool,
     /// When false (default), completed tasks are hidden from the list.
     pub show_completed: bool,
+    /// `@odata.nextLink` for the current list's tasks when more pages exist
+    /// ("Load more"); reset on a fresh load.
+    pub next_link: Option<String>,
+    /// A "load more" fetch is in flight.
+    pub loading_more: bool,
+    /// At least one extra page has been loaded; suppresses the periodic
+    /// auto-refresh so manually-loaded pages aren't collapsed.
+    pub loaded_more: bool,
     /// Id of the task currently awaiting delete confirmation, if any.
     pub confirming_delete: Option<String>,
     /// Whether the popup shows the task list or the create/edit form.
@@ -84,18 +91,6 @@ impl Ready {
         }
     }
 
-    /// Replaces an optimistic placeholder task (by temp id) with the real one.
-    pub fn reconcile_created(&mut self, temp_id: &str, created: TodoTask) {
-        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == temp_id) {
-            *task = created;
-        }
-    }
-
-    /// Removes an optimistic placeholder after a failed create.
-    pub fn remove_task(&mut self, task_id: &str) {
-        self.tasks.retain(|t| t.id != task_id);
-    }
-
     /// Applies a freshly-fetched task list, preserving not-yet-reconciled
     /// optimistic placeholders (`temp-*`) so a poll landing mid-create doesn't
     /// drop a task the user just added.
@@ -106,6 +101,12 @@ impl Ready {
         self.tasks.extend(pending);
     }
 
+    /// Appends a "load more" page to the current tasks (subsequent pages are
+    /// disjoint from earlier ones).
+    pub fn append_page(&mut self, mut fetched: Vec<TodoTask>) {
+        self.tasks.append(&mut fetched);
+    }
+
     /// True for an optimistic placeholder id the server hasn't assigned yet.
     pub fn is_placeholder(id: &str) -> bool {
         id.starts_with("temp-")
@@ -113,7 +114,7 @@ impl Ready {
 
     /// Tasks to render: pending tasks sorted by due date ascending (overdue/due
     /// first, undated last) always; when `show_completed` is set, completed
-    /// tasks follow, most-recent first by `last_modified_date_time`.
+    /// tasks follow, newest-due first (undated last).
     pub fn visible_tasks(&self) -> Vec<&TodoTask> {
         let mut pending: Vec<&TodoTask> =
             self.tasks.iter().filter(|t| t.status != TaskStatus::Completed).collect();
@@ -130,7 +131,14 @@ impl Ready {
         }
         let mut completed: Vec<&TodoTask> =
             self.tasks.iter().filter(|t| t.status == TaskStatus::Completed).collect();
-        completed.sort_by(|a, b| b.last_modified_date_time.cmp(&a.last_modified_date_time));
+        // Newest-due first (undated last), matching the server's $orderby so
+        // "load more" appends older completed below.
+        completed.sort_by(|a, b| {
+            a.due_day()
+                .is_none()
+                .cmp(&b.due_day().is_none())
+                .then_with(|| b.due_day().cmp(&a.due_day()))
+        });
         pending.append(&mut completed);
         pending
     }
@@ -169,16 +177,6 @@ mod tests {
 
     fn task(id: &str, status: TaskStatus) -> TodoTask {
         TodoTask { id: id.into(), title: id.into(), status, ..Default::default() }
-    }
-
-    fn task_dated(id: &str, status: TaskStatus, date: &str) -> TodoTask {
-        TodoTask {
-            id: id.into(),
-            title: id.into(),
-            status,
-            last_modified_date_time: Some(date.into()),
-            ..Default::default()
-        }
     }
 
     fn task_due(id: &str, status: TaskStatus, due_day: &str) -> TodoTask {
@@ -229,13 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_replaces_placeholder() {
-        let mut ready = Ready { tasks: vec![task("temp-1", TaskStatus::NotStarted)], ..Default::default() };
-        ready.reconcile_created("temp-1", task("T7", TaskStatus::NotStarted));
-        assert_eq!(ready.tasks[0].id, "T7");
-    }
-
-    #[test]
     fn apply_refresh_keeps_optimistic_placeholders() {
         let mut ready = Ready {
             tasks: vec![task("temp-1", TaskStatus::NotStarted), task("T1", TaskStatus::Completed)],
@@ -262,17 +253,17 @@ mod tests {
     }
 
     #[test]
-    fn visible_tasks_appends_completed_newest_first_when_enabled() {
+    fn visible_tasks_sorts_completed_by_due_desc() {
         let ready = Ready {
             show_completed: true,
             tasks: vec![
-                task("p", TaskStatus::NotStarted),
-                task_dated("old", TaskStatus::Completed, "2026-06-01T00:00:00Z"),
-                task_dated("new", TaskStatus::Completed, "2026-06-10T00:00:00Z"),
+                task_due("p", TaskStatus::NotStarted, "2026-06-20"),
+                task_due("old", TaskStatus::Completed, "2026-05-01"),
+                task_due("new", TaskStatus::Completed, "2026-06-10"),
             ],
             ..Default::default()
         };
-        // Pending first, then completed sorted by date descending.
+        // Pending first, then completed by due date descending.
         let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
         assert_eq!(visible, vec!["p", "new", "old"]);
     }

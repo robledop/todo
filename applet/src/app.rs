@@ -19,6 +19,13 @@ use crate::config::Config;
 use crate::consts::{ACCOUNT_ID, APP_ID, CLIENT_ID, GRAPH_BASE};
 use crate::state::{AppState, PopupView, Ready};
 
+/// How often to check loaded tasks for reminders that just came due.
+const REMINDER_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Reminders that came due longer ago than this many seconds - e.g. while the
+/// applet was closed or the machine asleep - are skipped rather than replayed, so
+/// a missed reminder doesn't resurface as a stale notification.
+const REMINDER_GRACE_SECS: i64 = 120;
+
 /// The authenticated services. Held as `Option` so a (practically impossible)
 /// construction failure from malformed constants degrades to a config-error
 /// state instead of panicking in `init`.
@@ -33,8 +40,9 @@ pub struct AppModel {
     config: Config,
     state: AppState,
     services: Option<Services>,
-    /// Monotonic counter for optimistic placeholder ids.
-    temp_seq: u64,
+    /// Timestamp of the last reminder check; `None` until the first tick sets the
+    /// baseline so reminders from before startup don't fire.
+    reminder_last_check: Option<jiff::Timestamp>,
 }
 
 /// Classified outcome of a Graph call, so the UI can react to auth-expiry and
@@ -66,6 +74,9 @@ fn format_due(day: &str) -> String {
         .unwrap_or_else(|_| day.to_string())
 }
 
+/// A page of tasks plus the `@odata.nextLink` for the next page, if any.
+type TaskPage = (Vec<TodoTask>, Option<String>);
+
 #[derive(Debug, Clone)]
 pub enum Message {
     TogglePopup,
@@ -80,12 +91,12 @@ pub enum Message {
     Refresh,
     /// Carries the list id the tasks were fetched for, so stale responses from a
     /// previously-selected list can be discarded.
-    TasksLoaded(String, Result<Vec<TodoTask>, FetchError>),
-    AddInput(String),
-    AddSubmit,
-    TaskCreated(String, Result<TodoTask, FetchError>),
+    TasksLoaded(String, Result<TaskPage, FetchError>),
+    /// Fetch the next page of tasks (the "Load more" button).
+    LoadMore,
+    MoreTasksLoaded(String, Result<TaskPage, FetchError>),
     ToggleTask(String),
-    TaskUpdated(String, TaskStatus, Result<TodoTask, FetchError>),
+    TaskUpdated(String, TaskStatus, Result<Box<TodoTask>, FetchError>),
     DeleteRequested(String),
     DeleteCancelled,
     DeleteConfirmed(String),
@@ -98,6 +109,10 @@ pub enum Message {
     FormSaved(Result<Box<TodoTask>, FetchError>),
     ShowCompleted(bool),
     Retry,
+    /// Periodic check for reminders that just came due.
+    ReminderTick,
+    /// Result of firing one reminder notification (logged on failure).
+    ReminderNotified(Result<(), String>),
 }
 
 impl cosmic::Application for AppModel {
@@ -133,7 +148,14 @@ impl cosmic::Application for AppModel {
             }
         };
 
-        let model = AppModel { core, popup: None, config, state, services, temp_seq: 0 };
+        let model = AppModel {
+            core,
+            popup: None,
+            config,
+            state,
+            services,
+            reminder_last_check: None,
+        };
         (model, startup)
     }
 
@@ -206,11 +228,12 @@ impl cosmic::Application for AppModel {
     fn subscription(&self) -> Subscription<Message> {
         let poll = time::every(std::time::Duration::from_secs(self.config.poll_interval_secs.max(60)))
             .map(|_| Message::Tick);
+        let reminders = time::every(REMINDER_CHECK_INTERVAL).map(|_| Message::ReminderTick);
         let cfg = self
             .core()
             .watch_config::<Config>(APP_ID)
             .map(|update| Message::UpdateConfig(update.config));
-        Subscription::batch(vec![poll, cfg])
+        Subscription::batch(vec![poll, reminders, cfg])
     }
 
     fn update(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
@@ -291,13 +314,27 @@ impl cosmic::Application for AppModel {
                 return self.load_tasks(id);
             }
 
-            Message::Tick | Message::Refresh => {
+            // Periodic poll: skip while extra completed pages are loaded so they're
+            // not collapsed. An explicit Refresh always reloads from page 1.
+            Message::Tick => {
+                if let AppState::Ready(ready) = &self.state
+                    && !ready.selected_list_id.is_empty()
+                    && !ready.loaded_more
+                {
+                    return self.load_tasks(ready.selected_list_id.clone());
+                }
+            }
+            Message::Refresh => {
                 if let AppState::Ready(ready) = &self.state
                     && !ready.selected_list_id.is_empty()
                 {
                     return self.load_tasks(ready.selected_list_id.clone());
                 }
             }
+
+            Message::ReminderTick => return self.check_reminders(),
+            Message::ReminderNotified(Err(e)) => log::warn!("reminder notification failed: {e}"),
+            Message::ReminderNotified(Ok(())) => {}
             Message::TasksLoaded(list_id, result) => {
                 // Discard responses for a list the user already navigated away from.
                 let current =
@@ -306,9 +343,12 @@ impl cosmic::Application for AppModel {
                     return Task::none();
                 }
                 match result {
-                    Ok(tasks) => {
+                    Ok((tasks, next_link)) => {
                         if let AppState::Ready(ready) = &mut self.state {
                             ready.apply_refresh(tasks);
+                            ready.next_link = next_link;
+                            ready.loaded_more = false;
+                            ready.loading_more = false;
                             ready.loading = false;
                             ready.error = None;
                         }
@@ -317,12 +357,30 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            Message::AddInput(value) => {
-                if let AppState::Ready(ready) = &mut self.state {
-                    ready.add_input = value;
+            Message::LoadMore => return self.load_more(),
+            Message::MoreTasksLoaded(list_id, result) => {
+                let current =
+                    matches!(&self.state, AppState::Ready(r) if r.selected_list_id == list_id);
+                if !current {
+                    return Task::none();
+                }
+                match result {
+                    Ok((tasks, next_link)) => {
+                        if let AppState::Ready(ready) = &mut self.state {
+                            ready.append_page(tasks);
+                            ready.next_link = next_link;
+                            ready.loaded_more = true;
+                            ready.loading_more = false;
+                        }
+                    }
+                    Err(e) => {
+                        if let AppState::Ready(ready) = &mut self.state {
+                            ready.loading_more = false;
+                        }
+                        return self.handle_fetch_error(e);
+                    }
                 }
             }
-            Message::AddSubmit => return self.add_task(),
 
             Message::ShowCompleted(show) => {
                 // Refetch: ticking on loads completed tasks; ticking off returns
@@ -339,24 +397,12 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            Message::TaskCreated(temp_id, Ok(created)) => {
-                if let AppState::Ready(ready) = &mut self.state {
-                    ready.reconcile_created(&temp_id, created);
-                }
-            }
-            Message::TaskCreated(temp_id, Err(e)) => {
-                if let AppState::Ready(ready) = &mut self.state {
-                    ready.remove_task(&temp_id);
-                }
-                return self.handle_fetch_error(e);
-            }
-
             Message::ToggleTask(task_id) => return self.toggle_task(task_id),
             Message::TaskUpdated(_id, _prev, Ok(updated)) => {
                 if let AppState::Ready(ready) = &mut self.state
                     && let Some(t) = ready.tasks.iter_mut().find(|t| t.id == updated.id)
                 {
-                    *t = updated;
+                    *t = *updated;
                 }
             }
             Message::TaskUpdated(task_id, prev, Err(e)) => {
@@ -464,6 +510,7 @@ impl cosmic::Application for AppModel {
 
 impl AppModel {
     fn ready_view<'a>(&'a self, ready: &'a Ready) -> Element<'a, Message> {
+        use cosmic::iced::advanced::text::{Ellipsize, EllipsizeHeightLimit, Wrapping};
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
         // Header: list dropdown + refresh.
@@ -527,18 +574,24 @@ impl AppModel {
                     cosmic::iced::Color::from_rgb(0.8, 0.2, 0.2),
                 )));
             }
-            let mut row = row
-                // A real task's title opens the edit form; a not-yet-created (temp-)
-                // row has no server id to edit, so it stays plain text.
-                .push(if Ready::is_placeholder(&task.id) {
-                    Element::from(widget::text::body(task.title.clone()))
-                } else {
-                    widget::button::link(task.title.clone())
-                        .on_press(Message::OpenEdit(edit_id))
-                        .into()
-                })
-                .align_y(Alignment::Center)
-                .spacing(8);
+            // Single-line title that ellipsizes when too long, taking the leftover
+            // width so the due date and trash stay pinned and fully visible. A real
+            // task's title is a link that opens the edit form; a temp (not-yet-
+            // created) row has no server id to edit, so it stays plain text.
+            let title_text = widget::text::body(task.title.clone())
+                .wrapping(Wrapping::None)
+                .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+                .width(Length::Fill);
+            let title: Element<'_, Message> = if Ready::is_placeholder(&task.id) {
+                title_text.into()
+            } else {
+                widget::button::custom(title_text)
+                    .class(cosmic::theme::Button::Link)
+                    .on_press(Message::OpenEdit(edit_id))
+                    .width(Length::Fill)
+                    .into()
+            };
+            let mut row = row.push(title).align_y(Alignment::Center).spacing(8);
             if let Some(day) = task.due_day() {
                 let mut due_label = widget::text::caption(format_due(day));
                 if crate::state::is_due(day, &today) {
@@ -546,9 +599,7 @@ impl AppModel {
                         cosmic::iced::Color::from_rgb(0.8, 0.2, 0.2),
                     ));
                 }
-                row = row.push(widget::space::horizontal()).push(due_label);
-            } else {
-                row = row.push(widget::space::horizontal());
+                row = row.push(due_label);
             }
             // No trash on a not-yet-created (temp-) row.
             if !Ready::is_placeholder(&task.id) {
@@ -575,16 +626,25 @@ impl AppModel {
             // Reload in progress (e.g. fetching completed) - shown below current rows.
             list = list.push(widget::text::caption("Loading..."));
         }
+        // "Load more" for the next page of (completed) tasks, when one exists.
+        if ready.next_link.is_some() {
+            let label = if ready.loading_more { "Loading..." } else { "Load more" };
+            let load_more = widget::button::text(label)
+                .on_press_maybe((!ready.loading_more).then_some(Message::LoadMore));
+            list = list.push(
+                widget::Row::new()
+                    .push(widget::space::horizontal())
+                    .push(load_more)
+                    .push(widget::space::horizontal())
+                    .align_y(Alignment::Center),
+            );
+        }
 
         let show_completed_toggle = widget::Row::new()
             .push(widget::checkbox(ready.show_completed).on_toggle(Message::ShowCompleted))
             .push(widget::text::body("Show completed"))
             .align_y(Alignment::Center)
             .spacing(8);
-
-        let add = widget::text_input("Add a task...", &ready.add_input)
-            .on_input(Message::AddInput)
-            .on_submit(|_| Message::AddSubmit);
 
         let mut col = widget::Column::new()
             .push(header)
@@ -596,8 +656,6 @@ impl AppModel {
             .push(show_completed_toggle)
             .push(widget::divider::horizontal::default())
             .push(widget::scrollable(list).height(Length::Fixed(280.0)))
-            .push(widget::divider::horizontal::default())
-            .push(add)
             .spacing(8)
             .padding(12);
         if let Some(err) = &ready.error {
@@ -606,6 +664,35 @@ impl AppModel {
             )));
         }
         col.into()
+    }
+
+    /// Fires notifications for reminders that crossed their time since the last
+    /// check. The first call only records a baseline. Catch-up is capped by
+    /// `REMINDER_GRACE` so reminders missed while closed/asleep aren't replayed.
+    fn check_reminders(&mut self) -> Task<cosmic::Action<Message>> {
+        let now = jiff::Timestamp::now();
+        let Some(last) = self.reminder_last_check.replace(now) else {
+            return Task::none();
+        };
+        let floor = jiff::Timestamp::from_second(now.as_second() - REMINDER_GRACE_SECS).unwrap_or(now);
+        let lower = last.max(floor);
+        let AppState::Ready(ready) = &self.state else {
+            return Task::none();
+        };
+        let due = crate::reminders::due_reminders(&ready.tasks, lower, now);
+        if due.is_empty() {
+            return Task::none();
+        }
+        let notifications: Vec<Task<cosmic::Action<Message>>> = due
+            .iter()
+            .map(|task| {
+                let summary = task.title.clone();
+                Task::perform(crate::notify::notify(summary, "Reminder".to_string()), |res| {
+                    cosmic::action::app(Message::ReminderNotified(res.map_err(|e| e.to_string())))
+                })
+            })
+            .collect();
+        Task::batch(notifications)
     }
 
     fn toggle_popup(&mut self) -> Task<cosmic::Action<Message>> {
@@ -738,43 +825,46 @@ impl AppModel {
         let Some(services) = &self.services else {
             return Task::none();
         };
-        // Only fetch completed tasks when the user has opted in - pending-only is
-        // a single fast request; "all" pages through every completed task.
+        // Pending is always fetched complete; completed is fetched as a first page
+        // (newest-due first) only when opted in, with "load more" for the rest.
         let include_completed = matches!(&self.state, AppState::Ready(r) if r.show_completed);
         let graph = services.graph.clone();
         let id_for_msg = list_id.clone();
         Task::perform(
-            async move { graph.list_tasks(&list_id, include_completed).await.map_err(classify_graph) },
+            async move {
+                let pending = graph.list_pending(&list_id).await.map_err(classify_graph)?;
+                let (completed, next) = if include_completed {
+                    graph.list_completed_page(&list_id).await.map_err(classify_graph)?
+                } else {
+                    (Vec::new(), None)
+                };
+                let mut tasks = pending;
+                tasks.extend(completed);
+                Ok::<TaskPage, FetchError>((tasks, next))
+            },
             move |r| cosmic::action::app(Message::TasksLoaded(id_for_msg.clone(), r)),
         )
     }
 
-    fn add_task(&mut self) -> Task<cosmic::Action<Message>> {
-        let Some(services) = &self.services else {
+    /// Loads the next page of tasks ("Load more") and appends it to the list.
+    fn load_more(&mut self) -> Task<cosmic::Action<Message>> {
+        let Some(graph) = self.services.as_ref().map(|s| s.graph.clone()) else {
             return Task::none();
         };
         let AppState::Ready(ready) = &mut self.state else {
             return Task::none();
         };
-        let title = ready.add_input.trim().to_string();
-        if title.is_empty() {
+        if ready.loading_more {
             return Task::none();
         }
-        self.temp_seq += 1;
-        let temp_id = format!("temp-{}", self.temp_seq);
-        ready.tasks.push(TodoTask {
-            id: temp_id.clone(),
-            title: title.clone(),
-            status: TaskStatus::NotStarted,
-            ..Default::default()
-        });
-        ready.add_input.clear();
+        let Some(next) = ready.next_link.clone() else {
+            return Task::none();
+        };
+        ready.loading_more = true;
         let list_id = ready.selected_list_id.clone();
-        let input = outlook_tasks_core::models::TaskInput { title: title.clone(), ..Default::default() };
-        let graph = services.graph.clone();
         Task::perform(
-            async move { graph.create_task(&list_id, &input).await.map_err(classify_graph) },
-            move |r| cosmic::action::app(Message::TaskCreated(temp_id.clone(), r)),
+            async move { graph.list_tasks_page(&next).await.map_err(classify_graph) },
+            move |r| cosmic::action::app(Message::MoreTasksLoaded(list_id.clone(), r)),
         )
     }
 
@@ -802,7 +892,7 @@ impl AppModel {
         let id_for_msg = task_id.clone();
         Task::perform(
             async move {
-                graph.set_status(&list_id, &task_id, new_status).await.map_err(classify_graph)
+                graph.set_status(&list_id, &task_id, new_status).await.map(Box::new).map_err(classify_graph)
             },
             move |r| cosmic::action::app(Message::TaskUpdated(id_for_msg.clone(), prev, r)),
         )

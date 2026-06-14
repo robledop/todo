@@ -18,6 +18,8 @@ serde = { version = "1", features = ["derive"] }
 chrono = "0.4"
 # The libcosmic calendar widget's date type.
 jiff = "0.2"
+# Desktop notifications for due reminders via org.freedesktop.Notifications.
+zbus = { version = "5", features = ["tokio"] }
 
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"
