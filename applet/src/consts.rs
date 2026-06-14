@@ -1,4 +1,4 @@
-pub const APP_ID: &str = "dev.robledo.OutlookTasks";
+pub const APP_ID: &str = "dev.robledop.OutlookTasks";
 
 /// Graph API root (no trailing slash).
 pub const GRAPH_BASE: &str = "https://graph.microsoft.com/v1.0";
