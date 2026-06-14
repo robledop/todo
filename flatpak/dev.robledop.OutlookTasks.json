@@ -1,0 +1,48 @@
+{
+  "id": "dev.robledop.OutlookTasks",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "25.08",
+  "sdk": "org.freedesktop.Sdk",
+  "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
+  "base": "com.system76.Cosmic.BaseApp",
+  "base-version": "stable",
+  "command": "cosmic-applet-outlook-tasks",
+  "finish-args": [
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--share=ipc",
+    "--share=network",
+    "--talk-name=com.system76.CosmicSettingsDaemon",
+    "--filesystem=xdg-config/cosmic:rw"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "env": {
+      "CARGO_HOME": "/run/build/cosmic-applet-outlook-tasks/cargo",
+      "OUTLOOK_TASKS_CLIENT_ID": "993b5dc7-bb97-4768-8344-cdf0b6a90d50"
+    }
+  },
+  "modules": [
+    {
+      "name": "cosmic-applet-outlook-tasks",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo --offline fetch --manifest-path Cargo.toml --verbose",
+        "cargo --offline build --release --verbose",
+        "install -Dm0755 ./target/release/cosmic-applet-outlook-tasks -t /app/bin",
+        "install -Dm0644 ./applet/data/dev.robledop.OutlookTasks.desktop -t /app/share/applications",
+        "install -Dm0644 ./applet/data/dev.robledop.OutlookTasks.metainfo.xml -t /app/share/metainfo",
+        "install -Dm0644 ./applet/data/icons/dev.robledop.OutlookTasks-symbolic.svg -t /app/share/icons/hicolor/scalable/apps",
+        "install -Dm0644 ./applet/data/icons/dev.robledop.OutlookTasks.svg -t /app/share/icons/hicolor/scalable/apps"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/robledop/todo.git",
+          "tag": "v0.1.0"
+        },
+        "cargo-sources.json"
+      ]
+    }
+  ]
+}

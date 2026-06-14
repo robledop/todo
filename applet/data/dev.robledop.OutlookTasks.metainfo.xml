@@ -1,13 +1,77 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<component type="addon">
+<component type="desktop-application">
   <id>dev.robledop.OutlookTasks</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
+
   <name>Outlook Tasks</name>
   <summary>Manage outlook.com tasks from the COSMIC panel</summary>
+
   <description>
-    <p>A COSMIC panel applet to view, complete, and add Microsoft To Do tasks
-       on a personal outlook.com account via the Microsoft Graph API.</p>
+    <p>
+      A COSMIC panel applet to view, create, edit, complete, and delete Microsoft
+      To Do tasks on a personal outlook.com account via the Microsoft Graph API.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>View pending tasks sorted by due date, with overdue tasks highlighted.</li>
+      <li>Create, edit, and delete tasks with due dates, recurrence, importance, and reminders.</li>
+      <li>Complete tasks directly from the panel popup.</li>
+      <li>Sign in with Microsoft using OAuth 2.0 (PKCE); tokens are kept in the system keyring.</li>
+    </ul>
   </description>
+
+  <developer id="dev.robledop">
+    <name>Robledo Pazotto</name>
+  </developer>
+
+  <launchable type="desktop-id">dev.robledop.OutlookTasks.desktop</launchable>
+
+  <provides>
+    <id>com.system76.CosmicApplet</id>
+    <binary>cosmic-applet-outlook-tasks</binary>
+  </provides>
+
+  <categories>
+    <category>COSMIC</category>
+    <category>Utility</category>
+  </categories>
+
+  <keywords>
+    <keyword>COSMIC</keyword>
+    <keyword>Tasks</keyword>
+    <keyword>Todo</keyword>
+    <keyword>Outlook</keyword>
+    <keyword>Microsoft</keyword>
+  </keywords>
+
   <url type="homepage">https://github.com/robledop/todo</url>
+  <url type="bugtracker">https://github.com/robledop/todo/issues</url>
+  <url type="vcs-browser">https://github.com/robledop/todo</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/robledop/todo/master/img/screenshot1.png</image>
+      <caption>Pending tasks in the panel popup, sorted by due date with overdue tasks highlighted</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/robledop/todo/master/img/screenshot2.png</image>
+      <caption>Creating a task with a due date, recurrence, importance, and a reminder</caption>
+    </screenshot>
+  </screenshots>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#cfe3ff</color>
+    <color type="primary" scheme_preference="dark">#1b3a5b</color>
+  </branding>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0" date="2026-06-14">
+      <description>
+        <p>Initial release: view, create, edit, complete, and delete tasks.</p>
+      </description>
+    </release>
+  </releases>
 </component>

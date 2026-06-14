@@ -6,6 +6,7 @@ Exec=cosmic-applet-outlook-tasks
 Icon=dev.robledop.OutlookTasks-symbolic
 Terminal=false
 Categories=COSMIC;
+Keywords=Tasks;Todo;Outlook;Microsoft;
 NoDisplay=true
 X-CosmicApplet=true
 X-CosmicHoverPopup=Auto

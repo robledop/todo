@@ -6,6 +6,7 @@ bin-src := "target/release/" + name
 bin-dst := prefix + "/bin/" + name
 desktop-dst := prefix + "/share/applications/" + appid + ".desktop"
 icon-dst := prefix + "/share/icons/hicolor/scalable/apps/" + appid + "-symbolic.svg"
+app-icon-dst := prefix + "/share/icons/hicolor/scalable/apps/" + appid + ".svg"
 metainfo-dst := prefix + "/share/metainfo/" + appid + ".metainfo.xml"
 
 # Build the release binary. Pass the client id via the env var.
@@ -26,7 +27,8 @@ install:
     install -Dm0755 {{bin-src}} {{bin-dst}}
     install -Dm0644 applet/data/{{appid}}.desktop {{desktop-dst}}
     install -Dm0644 applet/data/icons/{{appid}}-symbolic.svg {{icon-dst}}
+    install -Dm0644 applet/data/icons/{{appid}}.svg {{app-icon-dst}}
     install -Dm0644 applet/data/{{appid}}.metainfo.xml {{metainfo-dst}}
 
 uninstall:
-    rm -f {{bin-dst}} {{desktop-dst}} {{icon-dst}} {{metainfo-dst}}
+    rm -f {{bin-dst}} {{desktop-dst}} {{icon-dst}} {{app-icon-dst}} {{metainfo-dst}}
