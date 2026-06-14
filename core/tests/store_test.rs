@@ -37,7 +37,7 @@ use outlook_tasks_core::auth::Oo7TokenStore;
 #[tokio::test]
 #[ignore]
 async fn oo7_store_roundtrips_against_real_keyring() {
-    let store = Oo7TokenStore::new("dev.robledo.OutlookTasks.test", "primary");
+    let store = Oo7TokenStore::new("dev.robledop.OutlookTasks.test", "primary");
     store
         .save(&StoredToken { refresh_token: "live-rt".into(), account_id: "primary".into() })
         .await
