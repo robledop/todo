@@ -33,10 +33,14 @@ fn not_found_and_io_classify_as_unavailable() {
 use outlook_tasks_core::auth::Oo7TokenStore;
 
 // Requires a running Secret Service provider (gnome-keyring/KWallet) and a
-// session bus. Run manually with: cargo test --test store_test -- --ignored
+// session bus, so it runs by default locally but skips under CI, which has no
+// keyring. CI runners conventionally set `CI`; honor that.
 #[tokio::test]
-#[ignore]
 async fn oo7_store_roundtrips_against_real_keyring() {
+    if std::env::var_os("CI").is_some() {
+        eprintln!("skipping oo7 keyring roundtrip: no Secret Service under CI");
+        return;
+    }
     let store = Oo7TokenStore::new("dev.robledop.OutlookTasks.test", "primary");
     store
         .save(&StoredToken { refresh_token: "live-rt".into(), account_id: "primary".into() })
