@@ -97,6 +97,9 @@ pub enum Message {
     MoreTasksLoaded(String, Result<TaskPage, FetchError>),
     ToggleTask(String),
     TaskUpdated(String, TaskStatus, Result<Box<TodoTask>, FetchError>),
+    /// A redraw frame while a completion exit animation is playing; prunes rows
+    /// whose animation has finished.
+    CompleteTick,
     DeleteRequested(String),
     DeleteCancelled,
     DeleteConfirmed(String),
@@ -163,68 +166,6 @@ impl cosmic::Application for AppModel {
         Some(Message::PopupClosed(id))
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let due = match &self.state {
-            AppState::Ready(ready) => ready.due_count(&today),
-            _ => 0,
-        };
-        if due == 0 {
-            return self
-                .core
-                .applet
-                .icon_button("checkbox-checked-symbolic")
-                .on_press(Message::TogglePopup)
-                .into();
-        }
-        // Panel badge: icon + count of currently-due tasks.
-        let body = widget::Row::new()
-            .push(widget::icon::from_name("checkbox-checked-symbolic").size(16))
-            .push(widget::text::body(due.to_string()))
-            .spacing(4)
-            .align_y(Alignment::Center);
-        widget::button::custom(body)
-            .class(cosmic::theme::Button::AppletIcon)
-            .on_press(Message::TogglePopup)
-            .into()
-    }
-
-    fn view_window(&self, _id: Id) -> Element<'_, Message> {
-        let content: Element<'_, Message> = match &self.state {
-            AppState::NoKeyring => widget::Column::new()
-                .push(widget::text::title4("No keyring found"))
-                .push(widget::text::body(
-                    "Install gnome-keyring or KWallet to store your sign-in, then retry.",
-                ))
-                .push(widget::button::standard("Retry").on_press(Message::Retry))
-                .spacing(8)
-                .padding(12)
-                .into(),
-            AppState::SignedOut => widget::Column::new()
-                .push(widget::text::title4("Outlook Tasks"))
-                .push(widget::text::body("Sign in to your outlook.com account."))
-                .push(widget::button::suggested("Sign in").on_press(Message::SignIn))
-                .spacing(8)
-                .padding(12)
-                .into(),
-            AppState::Authenticating => widget::Column::new()
-                .push(widget::text::body("Waiting for sign-in in your browser..."))
-                .padding(12)
-                .into(),
-            AppState::Error(msg) => widget::Column::new()
-                .push(widget::text::title4("Something went wrong"))
-                .push(widget::text::body(msg.as_str()))
-                .spacing(8)
-                .padding(12)
-                .into(),
-            AppState::Ready(ready) => match &ready.view {
-                PopupView::List => self.ready_view(ready),
-                PopupView::Form(form) => crate::task_form::form_view(form),
-            },
-        };
-        self.core.applet.popup_container(content).into()
-    }
-
     fn subscription(&self) -> Subscription<Message> {
         let poll = time::every(std::time::Duration::from_secs(self.config.poll_interval_secs.max(60)))
             .map(|_| Message::Tick);
@@ -233,7 +174,13 @@ impl cosmic::Application for AppModel {
             .core()
             .watch_config::<Config>(APP_ID)
             .map(|update| Message::UpdateConfig(update.config));
-        Subscription::batch(vec![poll, reminders, cfg])
+        let mut subs = vec![poll, reminders, cfg];
+        // Drive per-frame redraws only while a completion exit animation plays;
+        // the source drops out once the last animating row is gone.
+        if matches!(&self.state, AppState::Ready(r) if !r.completing.is_empty()) {
+            subs.push(cosmic::iced::window::frames().map(|_| Message::CompleteTick));
+        }
+        Subscription::batch(subs)
     }
 
     fn update(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
@@ -408,8 +355,15 @@ impl cosmic::Application for AppModel {
             Message::TaskUpdated(task_id, prev, Err(e)) => {
                 if let AppState::Ready(ready) = &mut self.state {
                     ready.restore_status(&task_id, prev);
+                    // A failed completion must reappear, not animate away.
+                    ready.cancel_completing(&task_id);
                 }
                 return self.handle_fetch_error(e);
+            }
+            Message::CompleteTick => {
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.prune_completing(std::time::Instant::now());
+                }
             }
 
             Message::DeleteRequested(id) => {
@@ -503,6 +457,68 @@ impl cosmic::Application for AppModel {
         Task::none()
     }
 
+    fn view(&self) -> Element<'_, Message> {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let due = match &self.state {
+            AppState::Ready(ready) => ready.due_count(&today),
+            _ => 0,
+        };
+        if due == 0 {
+            return self
+                .core
+                .applet
+                .icon_button("checkbox-checked-symbolic")
+                .on_press(Message::TogglePopup)
+                .into();
+        }
+        // Panel badge: icon + count of currently-due tasks.
+        let body = widget::Row::new()
+            .push(widget::icon::from_name("checkbox-checked-symbolic").size(16))
+            .push(widget::text::body(due.to_string()))
+            .spacing(4)
+            .align_y(Alignment::Center);
+        widget::button::custom(body)
+            .class(cosmic::theme::Button::AppletIcon)
+            .on_press(Message::TogglePopup)
+            .into()
+    }
+
+    fn view_window(&self, _id: Id) -> Element<'_, Message> {
+        let content: Element<'_, Message> = match &self.state {
+            AppState::NoKeyring => widget::Column::new()
+                .push(widget::text::title4("No keyring found"))
+                .push(widget::text::body(
+                    "Install gnome-keyring or KWallet to store your sign-in, then retry.",
+                ))
+                .push(widget::button::standard("Retry").on_press(Message::Retry))
+                .spacing(8)
+                .padding(12)
+                .into(),
+            AppState::SignedOut => widget::Column::new()
+                .push(widget::text::title4("Outlook Tasks"))
+                .push(widget::text::body("Sign in to your outlook.com account."))
+                .push(widget::button::suggested("Sign in").on_press(Message::SignIn))
+                .spacing(8)
+                .padding(12)
+                .into(),
+            AppState::Authenticating => widget::Column::new()
+                .push(widget::text::body("Waiting for sign-in in your browser..."))
+                .padding(12)
+                .into(),
+            AppState::Error(msg) => widget::Column::new()
+                .push(widget::text::title4("Something went wrong"))
+                .push(widget::text::body(msg.as_str()))
+                .spacing(8)
+                .padding(12)
+                .into(),
+            AppState::Ready(ready) => match &ready.view {
+                PopupView::List => self.ready_view(ready),
+                PopupView::Form(form) => crate::task_form::form_view(form),
+            },
+        };
+        self.core.applet.popup_container(content).into()
+    }
+
     fn style(&self) -> Option<cosmic::iced::theme::Style> {
         Some(cosmic::applet::style())
     }
@@ -512,6 +528,12 @@ impl AppModel {
     fn ready_view<'a>(&'a self, ready: &'a Ready) -> Element<'a, Message> {
         use cosmic::iced::advanced::text::{Ellipsize, EllipsizeHeightLimit, Wrapping};
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        // Dimmed foreground for a completing row's struck-through title.
+        let theme = cosmic::theme::active();
+        let struck_color = {
+            let c: cosmic::iced::Color = theme.cosmic().on_bg_color().into();
+            cosmic::iced::Color { a: 0.5, ..c }
+        };
 
         // Header: list dropdown + refresh.
         let names: Vec<String> = ready.lists.iter().map(|l| l.display_name.clone()).collect();
@@ -546,6 +568,28 @@ impl AppModel {
             .padding(cosmic::iced::Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 0.0 });
         for task in &visible {
             let id = task.id.clone();
+            // A just-completed row plays its exit animation: the title holds,
+            // struck through and dimmed, then the whole row collapses to nothing.
+            // Rendered as a clipped container whose max-height eases to zero;
+            // `visible_tasks` keeps the row listed until the animation finishes.
+            if let Some(anim) = ready
+                .completing
+                .get(&task.id)
+                .and_then(|started| crate::state::complete_anim(started.elapsed()))
+            {
+                let title = cosmic::iced::widget::rich_text([
+                    cosmic::iced::widget::span::<(), _>(task.title.clone())
+                        .strikethrough(true)
+                        .color(struck_color),
+                ]);
+                let row = widget::Row::new()
+                    .push(widget::checkbox(true))
+                    .push(title)
+                    .align_y(Alignment::Center)
+                    .spacing(8);
+                list = list.push(widget::container(row).max_height(anim.max_height).clip(true));
+                continue;
+            }
             let checked = task.status == TaskStatus::Completed;
             let edit_id = id.clone();
             let mut row = widget::Row::new()
@@ -886,6 +930,10 @@ impl AppModel {
         let AppState::Ready(ready) = &mut self.state else {
             return Task::none();
         };
+        // Ignore a re-toggle while the row is still playing its exit animation.
+        if ready.is_completing(&task_id) {
+            return Task::none();
+        }
         let Some(prev) = ready.toggle_optimistic(&task_id) else {
             return Task::none();
         };
@@ -894,6 +942,11 @@ impl AppModel {
         } else {
             TaskStatus::Completed
         };
+        // Completing a task while completed ones are hidden would make the row
+        // vanish instantly; play an exit animation before it's dropped.
+        if new_status == TaskStatus::Completed && !ready.show_completed {
+            ready.begin_completing(&task_id, std::time::Instant::now());
+        }
         let list_id = ready.selected_list_id.clone();
         let id_for_msg = task_id.clone();
         Task::perform(

@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
 use outlook_tasks_core::models::{TaskStatus, TodoList, TodoTask};
 
 use crate::task_form::TaskForm;
@@ -48,6 +51,11 @@ pub struct Ready {
     pub confirming_delete: Option<String>,
     /// Whether the popup shows the task list or the create/edit form.
     pub view: PopupView,
+    /// Tasks just marked complete that are playing their exit animation before
+    /// being hidden, keyed by task id with the instant the user completed them.
+    /// Only populated while completed tasks are hidden; otherwise the task stays
+    /// visible and needs no exit.
+    pub completing: HashMap<String, Instant>,
 }
 
 impl Ready {
@@ -116,8 +124,14 @@ impl Ready {
     /// first, undated last) always; when `show_completed` is set, completed
     /// tasks follow, newest-due first (undated last).
     pub fn visible_tasks(&self) -> Vec<&TodoTask> {
-        let mut pending: Vec<&TodoTask> =
-            self.tasks.iter().filter(|t| t.status != TaskStatus::Completed).collect();
+        // Pending tasks, plus any task still playing its completion exit
+        // animation, so a just-completed row collapses in place rather than
+        // vanishing. (`completing` is only populated while completed are hidden.)
+        let mut pending: Vec<&TodoTask> = self
+            .tasks
+            .iter()
+            .filter(|t| t.status != TaskStatus::Completed || self.completing.contains_key(&t.id))
+            .collect();
         // Sort by due date ascending so due/overdue (red) tasks float to the top;
         // tasks with no due date go last (server order preserved among ties).
         pending.sort_by(|a, b| {
@@ -129,8 +143,11 @@ impl Ready {
         if !self.show_completed {
             return pending;
         }
-        let mut completed: Vec<&TodoTask> =
-            self.tasks.iter().filter(|t| t.status == TaskStatus::Completed).collect();
+        let mut completed: Vec<&TodoTask> = self
+            .tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Completed && !self.completing.contains_key(&t.id))
+            .collect();
         // Newest-due first (undated last), matching the server's $orderby so
         // "load more" appends older completed below.
         completed.sort_by(|a, b| {
@@ -162,6 +179,65 @@ impl Ready {
     pub fn cancel_delete(&mut self) {
         self.confirming_delete = None;
     }
+
+    /// Starts the completion exit animation for a task (no-op if already
+    /// animating). Only meaningful while completed tasks are hidden.
+    pub fn begin_completing(&mut self, task_id: &str, at: Instant) {
+        self.completing.entry(task_id.to_string()).or_insert(at);
+    }
+
+    /// True while the task is playing its completion exit animation.
+    pub fn is_completing(&self, task_id: &str) -> bool {
+        self.completing.contains_key(task_id)
+    }
+
+    /// Stops a task's exit animation - e.g. its completion failed and was
+    /// reverted, so it must reappear as a normal row.
+    pub fn cancel_completing(&mut self, task_id: &str) {
+        self.completing.remove(task_id);
+    }
+
+    /// Drops tasks whose exit animation has finished. Returns true if any were
+    /// removed, i.e. the visible list changed.
+    pub fn prune_completing(&mut self, now: Instant) -> bool {
+        let before = self.completing.len();
+        self.completing
+            .retain(|_, started| complete_anim(now.saturating_duration_since(*started)).is_some());
+        self.completing.len() != before
+    }
+}
+
+/// How long a just-completed row holds, struck through, before it collapses.
+pub const COMPLETE_HOLD: Duration = Duration::from_millis(380);
+/// How long the row takes to collapse its height to nothing after the hold.
+pub const COMPLETE_COLLAPSE: Duration = Duration::from_millis(240);
+/// Clip height the collapse starts from, in px. Only needs to be at least the
+/// real single-line row height; `clip` hides any excess, so it never jumps.
+pub const COMPLETE_ROW_MAX_H: f32 = 32.0;
+
+/// The visual state of a completing row, given how long since it was completed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompleteAnim {
+    /// Max-height clip for the collapse, in px (full height during the hold).
+    pub max_height: f32,
+}
+
+/// Exit animation for a completing row. `None` once it has finished and the row
+/// should be dropped. Holds at full height through [`COMPLETE_HOLD`], then eases
+/// the height to zero over [`COMPLETE_COLLAPSE`].
+pub fn complete_anim(elapsed: Duration) -> Option<CompleteAnim> {
+    if elapsed >= COMPLETE_HOLD + COMPLETE_COLLAPSE {
+        return None;
+    }
+    let max_height = if elapsed <= COMPLETE_HOLD {
+        COMPLETE_ROW_MAX_H
+    } else {
+        let t = (elapsed - COMPLETE_HOLD).as_secs_f32() / COMPLETE_COLLAPSE.as_secs_f32();
+        // Ease-out cubic: collapses quickly, then settles gently closed.
+        let eased = 1.0 - (1.0 - t).powi(3);
+        COMPLETE_ROW_MAX_H * (1.0 - eased)
+    };
+    Some(CompleteAnim { max_height })
 }
 
 /// True when a task's due day (`YYYY-MM-DD`) is due - today or earlier.
@@ -318,5 +394,68 @@ mod tests {
         assert_eq!(ready.confirming_delete.as_deref(), Some("b"));
         ready.cancel_delete();
         assert_eq!(ready.confirming_delete, None);
+    }
+
+    #[test]
+    fn visible_tasks_keeps_completing_task_in_place_while_hidden() {
+        let mut ready = Ready {
+            tasks: vec![
+                task_due("a", TaskStatus::NotStarted, "2026-06-10"),
+                task_due("b", TaskStatus::NotStarted, "2026-06-12"),
+                task_due("c", TaskStatus::NotStarted, "2026-06-15"),
+            ],
+            show_completed: false,
+            ..Default::default()
+        };
+        // Complete the middle task: now Completed, but still animating out.
+        ready.toggle_optimistic("b");
+        ready.begin_completing("b", Instant::now());
+        // It stays in its due-sorted position instead of vanishing.
+        let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(visible, vec!["a", "b", "c"]);
+        // Once it stops animating, it's hidden like any completed task.
+        ready.cancel_completing("b");
+        let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(visible, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn completing_only_starts_once_and_keeps_first_instant() {
+        let mut ready = Ready::default();
+        let t0 = Instant::now();
+        ready.begin_completing("a", t0);
+        ready.begin_completing("a", t0 + Duration::from_secs(1)); // ignored
+        assert!(ready.is_completing("a"));
+        assert_eq!(ready.completing.get("a"), Some(&t0));
+        ready.cancel_completing("a");
+        assert!(!ready.is_completing("a"));
+    }
+
+    #[test]
+    fn prune_completing_drops_only_finished_animations() {
+        let mut ready = Ready::default();
+        let start = Instant::now();
+        ready.begin_completing("a", start);
+        // Mid-animation: nothing pruned.
+        assert!(!ready.prune_completing(start + COMPLETE_HOLD));
+        assert!(ready.is_completing("a"));
+        // Past the full duration: pruned, and the change is reported.
+        assert!(ready.prune_completing(start + COMPLETE_HOLD + COMPLETE_COLLAPSE));
+        assert!(!ready.is_completing("a"));
+    }
+
+    #[test]
+    fn complete_anim_holds_full_height_then_collapses_to_none() {
+        // Full height from the start through the entire hold phase.
+        assert_eq!(complete_anim(Duration::ZERO).unwrap().max_height, COMPLETE_ROW_MAX_H);
+        assert_eq!(complete_anim(COMPLETE_HOLD).unwrap().max_height, COMPLETE_ROW_MAX_H);
+        // During the collapse the height shrinks monotonically.
+        let quarter = complete_anim(COMPLETE_HOLD + COMPLETE_COLLAPSE / 4).unwrap().max_height;
+        let three_q = complete_anim(COMPLETE_HOLD + COMPLETE_COLLAPSE * 3 / 4).unwrap().max_height;
+        assert!(quarter < COMPLETE_ROW_MAX_H, "collapse should have begun");
+        assert!(three_q < quarter, "height should keep decreasing");
+        assert!(three_q > 0.0, "still partly open before the end");
+        // At and past the end the animation is over.
+        assert!(complete_anim(COMPLETE_HOLD + COMPLETE_COLLAPSE).is_none());
     }
 }
