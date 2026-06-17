@@ -99,14 +99,20 @@ impl Ready {
         }
     }
 
-    /// Applies a freshly-fetched task list, preserving not-yet-reconciled
-    /// optimistic placeholders (`temp-*`) so a poll landing mid-create doesn't
-    /// drop a task the user just added.
+    /// Applies a freshly-fetched task list, carrying over rows the server's
+    /// pending-only list omits: not-yet-reconciled optimistic placeholders
+    /// (`temp-*`), so a poll landing mid-create doesn't drop a task the user
+    /// just added; and rows still playing their completion exit animation, so a
+    /// poll landing mid-animation doesn't make the row vanish early.
     pub fn apply_refresh(&mut self, fetched: Vec<TodoTask>) {
-        let pending: Vec<TodoTask> =
-            self.tasks.iter().filter(|t| Self::is_placeholder(&t.id)).cloned().collect();
+        let carried: Vec<TodoTask> = self
+            .tasks
+            .iter()
+            .filter(|t| Self::is_placeholder(&t.id) || self.completing.contains_key(&t.id))
+            .cloned()
+            .collect();
         self.tasks = fetched;
-        self.tasks.extend(pending);
+        self.tasks.extend(carried);
     }
 
     /// Appends a "load more" page to the current tasks (subsequent pages are
@@ -417,6 +423,23 @@ mod tests {
         ready.cancel_completing("b");
         let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
         assert_eq!(visible, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn apply_refresh_preserves_completing_row() {
+        let mut ready = Ready {
+            tasks: vec![task("a", TaskStatus::NotStarted), task("b", TaskStatus::NotStarted)],
+            show_completed: false,
+            ..Default::default()
+        };
+        ready.toggle_optimistic("b"); // b -> Completed (optimistic)
+        ready.begin_completing("b", Instant::now()); // animating out
+        // A pending-only refresh (the server omits the now-completed "b") must
+        // not drop the row while its exit animation is still playing.
+        ready.apply_refresh(vec![task("a", TaskStatus::NotStarted)]);
+        assert!(ready.tasks.iter().any(|t| t.id == "b"), "completing row preserved");
+        let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(visible, vec!["a", "b"]);
     }
 
     #[test]
