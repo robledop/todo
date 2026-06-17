@@ -66,11 +66,16 @@ impl GraphClient {
     }
 
     /// Fetches a subsequent tasks page from an `@odata.nextLink` produced by
-    /// `list_completed_page` (already origin-checked when it was returned).
+    /// `list_completed_page`. Re-validates the origin before sending the bearer
+    /// token: callers pass server-returned links today, but this is a public API
+    /// and must never carry the token to a host off the Graph origin.
     pub async fn list_tasks_page(
         &self,
         next_link: &str,
     ) -> Result<(Vec<TodoTask>, Option<String>), GraphError> {
+        if !same_graph_origin(&self.base_url, next_link) {
+            return Err(GraphError::Decode("unexpected nextLink origin".into()));
+        }
         self.fetch_tasks_page(next_link.to_string()).await
     }
 

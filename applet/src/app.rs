@@ -775,9 +775,12 @@ impl AppModel {
     /// state rather than a panic.
     fn build_services() -> Result<Services, String> {
         // Disable redirects: a 3xx from Graph must not redirect a bearer-bearing
-        // request to another origin.
+        // request to another origin. Bound the calls so a stalled Graph endpoint
+        // can't hang a refresh or a UI action indefinitely.
         let http = reqwest::ClientBuilder::new()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| e.to_string())?;
         let refresh_oauth =

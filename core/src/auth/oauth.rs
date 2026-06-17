@@ -9,6 +9,12 @@ use url::Url;
 
 use crate::error::AuthError;
 
+/// Bound the IdP HTTP calls so a stalled token endpoint can't hang sign-in or a
+/// refresh indefinitely (a refresh holds the authenticator's refresh lock for
+/// its whole duration).
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Fully-typed oauth2 client once auth + token URIs are set.
 type ConfiguredClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
@@ -40,12 +46,23 @@ impl AuthConfig {
     }
 }
 
-/// Tokens returned by an exchange or refresh.
-#[derive(Debug, Clone)]
+/// Tokens returned by an exchange or refresh. `Debug` is hand-written to keep the
+/// access/refresh token values out of logs and error formatting.
+#[derive(Clone)]
 pub struct TokenSet {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_in: Duration,
+}
+
+impl std::fmt::Debug for TokenSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenSet")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// State carried between building the authorize URL and redeeming the code.
@@ -78,6 +95,8 @@ impl OAuthClient {
         // No redirects: avoids SSRF on the token endpoint.
         let http = reqwest::ClientBuilder::new()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .timeout(HTTP_TOTAL_TIMEOUT)
             .build()
             .map_err(|e| AuthError::Protocol(e.to_string()))?;
         Ok(Self { client, http, scopes: cfg.scopes.clone() })
@@ -147,11 +166,21 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-/// Parsed authorization redirect parameters.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Parsed authorization redirect parameters. `Debug` is hand-written so the
+/// one-time `code` and CSRF `state` never reach logs or assertion output.
+#[derive(Clone, PartialEq, Eq)]
 pub struct RedirectParams {
     pub code: String,
     pub state: String,
+}
+
+impl std::fmt::Debug for RedirectParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedirectParams")
+            .field("code", &"<redacted>")
+            .field("state", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Parses the `code`/`state` from a loopback redirect request line such as

@@ -51,3 +51,11 @@ async fn oo7_store_roundtrips_against_real_keyring() {
     store.clear().await.unwrap();
     assert!(store.load().await.unwrap().is_none());
 }
+
+#[test]
+fn stored_token_debug_redacts_refresh_token() {
+    let t = StoredToken { refresh_token: "super-secret-rt".into(), account_id: "primary".into() };
+    let dbg = format!("{t:?}");
+    assert!(!dbg.contains("super-secret-rt"), "refresh token leaked: {dbg}");
+    assert!(dbg.contains("primary")); // account id is not a secret
+}

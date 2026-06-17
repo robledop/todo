@@ -363,3 +363,22 @@ async fn delete_task_maps_404_to_error() {
     let err = client.delete_task("L1", "GONE").await.unwrap_err();
     assert!(matches!(err, outlook_tasks_core::GraphError::Http { status: 404, .. }));
 }
+
+#[tokio::test]
+async fn list_tasks_page_rejects_foreign_next_link() {
+    // A next link pointing off the Graph origin must be refused before any
+    // request is made, so the bearer token is never sent to a forged host.
+    let server = MockServer::start().await;
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("t".to_string())),
+    );
+    let err = client
+        .list_tasks_page("http://evil.example/me/todo/lists/L1/tasks?$skiptoken=x")
+        .await
+        .unwrap_err();
+    // Decode = early origin rejection; a Network error would mean a request went out.
+    assert!(matches!(err, outlook_tasks_core::GraphError::Decode(_)));
+    assert_eq!(server.received_requests().await.unwrap().len(), 0);
+}

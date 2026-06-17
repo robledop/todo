@@ -3,11 +3,21 @@ use async_trait::async_trait;
 
 use crate::error::KeyringError;
 
-/// What we persist between launches. The access token is never stored.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What we persist between launches. The access token is never stored. `Debug`
+/// is hand-written so the refresh token never reaches logs or error formatting.
+#[derive(Clone, PartialEq, Eq)]
 pub struct StoredToken {
     pub refresh_token: String,
     pub account_id: String,
+}
+
+impl std::fmt::Debug for StoredToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredToken")
+            .field("refresh_token", &"<redacted>")
+            .field("account_id", &self.account_id)
+            .finish()
+    }
 }
 
 /// Abstracts secret storage so the authenticator is testable without a keyring.

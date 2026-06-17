@@ -103,3 +103,26 @@ fn parse_redirect_surfaces_provider_error() {
     let err = parse_redirect("/?error=access_denied").unwrap_err();
     assert!(matches!(err, outlook_tasks_core::AuthError::Provider(_)));
 }
+
+use outlook_tasks_core::auth::{RedirectParams, TokenSet};
+
+#[test]
+fn token_set_debug_redacts_secrets() {
+    let ts = TokenSet {
+        access_token: "super-secret-access".into(),
+        refresh_token: Some("super-secret-refresh".into()),
+        expires_in: std::time::Duration::from_secs(3600),
+    };
+    let dbg = format!("{ts:?}");
+    assert!(!dbg.contains("super-secret-access"), "access token leaked: {dbg}");
+    assert!(!dbg.contains("super-secret-refresh"), "refresh token leaked: {dbg}");
+    assert!(dbg.contains("<redacted>"));
+}
+
+#[test]
+fn redirect_params_debug_redacts_code_and_state() {
+    let p = RedirectParams { code: "the-auth-code".into(), state: "the-csrf-state".into() };
+    let dbg = format!("{p:?}");
+    assert!(!dbg.contains("the-auth-code"), "code leaked: {dbg}");
+    assert!(!dbg.contains("the-csrf-state"), "state leaked: {dbg}");
+}
