@@ -19,6 +19,9 @@ pub enum PopupView {
 pub enum AppState {
     /// No Secret Service provider available.
     NoKeyring,
+    /// Startup session check running; no sign-in is offered yet, so a stale
+    /// bootstrap result can't clobber an in-progress browser flow.
+    Bootstrapping,
     /// No stored session.
     SignedOut,
     /// Browser sign-in in progress.
@@ -184,6 +187,20 @@ impl Ready {
     /// Clears the pending delete confirmation.
     pub fn cancel_delete(&mut self) {
         self.confirming_delete = None;
+    }
+
+    /// Switches the visible list, clearing every list-scoped piece of state so
+    /// stale pagination, a pending delete confirmation, or an in-flight exit
+    /// animation from the previous list can't bleed into the new one.
+    pub fn switch_to_list(&mut self, id: String) {
+        self.selected_list_id = id;
+        self.tasks.clear();
+        self.next_link = None;
+        self.loading_more = false;
+        self.loaded_more = false;
+        self.confirming_delete = None;
+        self.completing.clear();
+        self.loading = true;
     }
 
     /// Starts the completion exit animation for a task (no-op if already
@@ -423,6 +440,29 @@ mod tests {
         ready.cancel_completing("b");
         let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
         assert_eq!(visible, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn switch_to_list_clears_all_list_scoped_state() {
+        let mut ready = Ready {
+            selected_list_id: "old".into(),
+            tasks: vec![task("a", TaskStatus::NotStarted)],
+            next_link: Some("https://graph/old/next".into()),
+            loading_more: true,
+            loaded_more: true,
+            confirming_delete: Some("a".into()),
+            ..Default::default()
+        };
+        ready.begin_completing("a", Instant::now());
+        ready.switch_to_list("new".into());
+        assert_eq!(ready.selected_list_id, "new");
+        assert!(ready.tasks.is_empty());
+        assert_eq!(ready.next_link, None);
+        assert!(!ready.loading_more);
+        assert!(!ready.loaded_more);
+        assert_eq!(ready.confirming_delete, None);
+        assert!(ready.completing.is_empty());
+        assert!(ready.loading);
     }
 
     #[test]

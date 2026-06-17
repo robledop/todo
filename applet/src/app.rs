@@ -143,7 +143,7 @@ impl cosmic::Application for AppModel {
                 let startup = Task::perform(async move { auth.bootstrap().await }, |o| {
                     cosmic::action::app(Message::Bootstrapped(o))
                 });
-                (AppState::SignedOut, Some(services), startup)
+                (AppState::Bootstrapping, Some(services), startup)
             }
             Err(e) => {
                 log::error!("failed to initialise services: {e}");
@@ -208,13 +208,18 @@ impl cosmic::Application for AppModel {
                 }
             }
 
-            // A fresh sign-in and a startup check both produce a BootstrapOutcome.
-            Message::Bootstrapped(outcome) | Message::SignedIn(outcome) => {
-                return self.apply_outcome(outcome);
+            // Startup check: apply only if still bootstrapping, so a slow result
+            // can't clobber a sign-in the user already started.
+            Message::Bootstrapped(outcome) => {
+                if matches!(self.state, AppState::Bootstrapping) {
+                    return self.apply_outcome(outcome);
+                }
             }
+            // A completed browser sign-in always wins.
+            Message::SignedIn(outcome) => return self.apply_outcome(outcome),
 
             Message::Retry => {
-                self.state = AppState::SignedOut;
+                self.state = AppState::Bootstrapping;
                 return self.rebootstrap();
             }
 
@@ -254,9 +259,7 @@ impl cosmic::Application for AppModel {
                 self.config.selected_list_id = Some(id.clone());
                 self.persist_config();
                 if let AppState::Ready(ready) = &mut self.state {
-                    ready.selected_list_id = id.clone();
-                    ready.loading = true;
-                    ready.tasks.clear();
+                    ready.switch_to_list(id.clone());
                 }
                 return self.load_tasks(id);
             }
@@ -499,6 +502,10 @@ impl cosmic::Application for AppModel {
                 .push(widget::text::body("Sign in to your outlook.com account."))
                 .push(widget::button::suggested("Sign in").on_press(Message::SignIn))
                 .spacing(8)
+                .padding(12)
+                .into(),
+            AppState::Bootstrapping => widget::Column::new()
+                .push(widget::text::body("Checking sign-in..."))
                 .padding(12)
                 .into(),
             AppState::Authenticating => widget::Column::new()
@@ -835,7 +842,7 @@ impl AppModel {
     fn handle_fetch_error(&mut self, error: FetchError) -> Task<cosmic::Action<Message>> {
         match error {
             FetchError::Auth => {
-                self.state = AppState::SignedOut;
+                self.state = AppState::Bootstrapping;
                 self.rebootstrap()
             }
             FetchError::Throttled(secs) => {
