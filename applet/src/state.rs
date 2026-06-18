@@ -59,6 +59,10 @@ pub struct Ready {
     /// Only populated while completed tasks are hidden; otherwise the task stays
     /// visible and needs no exit.
     pub completing: HashMap<String, Instant>,
+    /// Monotonic counter bumped on every full task load. A load response carries
+    /// the generation it was issued under and is discarded unless it still
+    /// matches, so a slow load can't overwrite the result of a newer one.
+    pub load_gen: u64,
 }
 
 impl Ready {
@@ -187,6 +191,19 @@ impl Ready {
     /// Clears the pending delete confirmation.
     pub fn cancel_delete(&mut self) {
         self.confirming_delete = None;
+    }
+
+    /// Bumps and returns the load generation, marking the start of a new full
+    /// load. Responses tagged with an earlier generation are then stale.
+    pub fn next_load_gen(&mut self) -> u64 {
+        self.load_gen += 1;
+        self.load_gen
+    }
+
+    /// True if a load response for `list_id`/`generation` is still the one being
+    /// awaited (same list, newest generation) and so should be applied.
+    pub fn is_current_load(&self, list_id: &str, generation: u64) -> bool {
+        self.selected_list_id == list_id && self.load_gen == generation
     }
 
     /// Switches the visible list, clearing every list-scoped piece of state so
@@ -440,6 +457,17 @@ mod tests {
         ready.cancel_completing("b");
         let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
         assert_eq!(visible, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn load_generation_supersedes_older_loads() {
+        let mut ready = Ready { selected_list_id: "L1".into(), ..Default::default() };
+        let g1 = ready.next_load_gen();
+        let g2 = ready.next_load_gen();
+        assert!(g2 > g1);
+        assert!(ready.is_current_load("L1", g2)); // newest on current list
+        assert!(!ready.is_current_load("L1", g1)); // superseded generation
+        assert!(!ready.is_current_load("L2", g2)); // wrong list
     }
 
     #[test]

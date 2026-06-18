@@ -89,12 +89,13 @@ pub enum Message {
     SelectList(String),
     Tick,
     Refresh,
-    /// Carries the list id the tasks were fetched for, so stale responses from a
-    /// previously-selected list can be discarded.
-    TasksLoaded(String, Result<TaskPage, FetchError>),
+    /// (list id, load generation, result). Discarded unless the list and
+    /// generation are still current, so a stale or out-of-order load can't
+    /// overwrite a newer one - see `Ready::is_current_load`.
+    TasksLoaded(String, u64, Result<TaskPage, FetchError>),
     /// Fetch the next page of tasks (the "Load more" button).
     LoadMore,
-    MoreTasksLoaded(String, Result<TaskPage, FetchError>),
+    MoreTasksLoaded(String, u64, Result<TaskPage, FetchError>),
     ToggleTask(String),
     TaskUpdated(String, TaskStatus, Result<Box<TodoTask>, FetchError>),
     /// A redraw frame while a completion exit animation is playing; prunes rows
@@ -288,11 +289,11 @@ impl cosmic::Application for AppModel {
             Message::ReminderTick => return self.check_reminders(),
             Message::ReminderNotified(Err(e)) => log::warn!("reminder notification failed: {e}"),
             Message::ReminderNotified(Ok(())) => {}
-            Message::TasksLoaded(list_id, result) => {
-                // Discard responses for a list the user already navigated away from.
-                let current =
-                    matches!(&self.state, AppState::Ready(r) if r.selected_list_id == list_id);
-                if !current {
+            Message::TasksLoaded(list_id, generation, result) => {
+                // Discard a response for a list the user left, or a load superseded
+                // by a newer one.
+                if !matches!(&self.state, AppState::Ready(r) if r.is_current_load(&list_id, generation))
+                {
                     return Task::none();
                 }
                 match result {
@@ -311,10 +312,9 @@ impl cosmic::Application for AppModel {
             }
 
             Message::LoadMore => return self.load_more(),
-            Message::MoreTasksLoaded(list_id, result) => {
-                let current =
-                    matches!(&self.state, AppState::Ready(r) if r.selected_list_id == list_id);
-                if !current {
+            Message::MoreTasksLoaded(list_id, generation, result) => {
+                if !matches!(&self.state, AppState::Ready(r) if r.is_current_load(&list_id, generation))
+                {
                     return Task::none();
                 }
                 match result {
@@ -893,14 +893,17 @@ impl AppModel {
         )
     }
 
-    fn load_tasks(&self, list_id: String) -> Task<cosmic::Action<Message>> {
-        let Some(services) = &self.services else {
+    fn load_tasks(&mut self, list_id: String) -> Task<cosmic::Action<Message>> {
+        let Some(graph) = self.services.as_ref().map(|s| s.graph.clone()) else {
             return Task::none();
         };
         // Pending is always fetched complete; completed is fetched as a first page
-        // (newest-due first) only when opted in, with "load more" for the rest.
-        let include_completed = matches!(&self.state, AppState::Ready(r) if r.show_completed);
-        let graph = services.graph.clone();
+        // (newest-due first) only when opted in, with "load more" for the rest. Bump
+        // the load generation so an older in-flight load can't overwrite this one.
+        let (include_completed, generation) = match &mut self.state {
+            AppState::Ready(r) => (r.show_completed, r.next_load_gen()),
+            _ => return Task::none(),
+        };
         let id_for_msg = list_id.clone();
         Task::perform(
             async move {
@@ -914,7 +917,7 @@ impl AppModel {
                 tasks.extend(completed);
                 Ok::<TaskPage, FetchError>((tasks, next))
             },
-            move |r| cosmic::action::app(Message::TasksLoaded(id_for_msg.clone(), r)),
+            move |r| cosmic::action::app(Message::TasksLoaded(id_for_msg.clone(), generation, r)),
         )
     }
 
@@ -934,9 +937,12 @@ impl AppModel {
         };
         ready.loading_more = true;
         let list_id = ready.selected_list_id.clone();
+        // Capture the current generation (no bump): a full reload starting before
+        // this page returns will supersede it.
+        let generation = ready.load_gen;
         Task::perform(
             async move { graph.list_tasks_page(&next).await.map_err(classify_graph) },
-            move |r| cosmic::action::app(Message::MoreTasksLoaded(list_id.clone(), r)),
+            move |r| cosmic::action::app(Message::MoreTasksLoaded(list_id.clone(), generation, r)),
         )
     }
 
