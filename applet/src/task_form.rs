@@ -47,6 +47,9 @@ pub struct TaskForm {
     pub reminder_date: Option<String>, // YYYY-MM-DD
     pub reminder_time: String,         // HH:MM
     pub error: Option<String>,
+    /// A save request is in flight; suppresses re-submits so a double-click
+    /// can't create the task twice.
+    pub saving: bool,
 
     // View-only picker state (not part of to_input/from_task), but it participates
     // in PartialEq/Eq - fine, CalendarModel is Eq.
@@ -75,6 +78,7 @@ impl Default for TaskForm {
             reminder_date: None,
             reminder_time: "09:00".into(),
             error: None,
+            saving: false,
             due_open: false,
             due_cal: cosmic::widget::calendar::CalendarModel::now(),
             reminder_open: false,
@@ -450,8 +454,11 @@ pub fn form_view(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
     }
 
     // Disable Save while the form is invalid (timezone-independent check, same as
-    // the validity hint above): an omitted `on_press` renders a disabled button.
-    let save_press = form.to_input("UTC").is_ok().then_some(Message::SaveForm);
+    // the validity hint above) or while a save is already in flight: an omitted
+    // `on_press` renders a disabled button.
+    let save_press =
+        (!form.saving && form.to_input("UTC").is_ok()).then_some(Message::SaveForm);
+    let save_label = if form.saving { "Saving..." } else { "Save" };
 
     // The form body scrolls; the action bar is pinned below it so Save and Cancel
     // stay visible however long the form grows or whichever date picker is open.
@@ -461,7 +468,7 @@ pub fn form_view(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
     let footer = widget::Row::new()
         .push(widget::space::horizontal())
         .push(widget::button::text("Cancel").on_press(Message::CancelForm))
-        .push(widget::button::suggested("Save").on_press_maybe(save_press))
+        .push(widget::button::suggested(save_label).on_press_maybe(save_press))
         .align_y(cosmic::iced::Alignment::Center)
         .spacing(8)
         .padding(cosmic::iced::Padding { top: 0.0, right: 12.0, bottom: 12.0, left: 12.0 });

@@ -103,13 +103,16 @@ pub enum Message {
     DeleteRequested(String),
     DeleteCancelled,
     DeleteConfirmed(String),
-    TaskDeleted(Box<TodoTask>, Result<(), FetchError>),
+    /// Carries the list the delete was issued against, so a result landing after
+    /// a list switch can't mutate the wrong list.
+    TaskDeleted(String, Box<TodoTask>, Result<(), FetchError>),
     OpenCreate,
     OpenEdit(String),
     CancelForm,
     Form(crate::task_form::FormMsg),
     SaveForm,
-    FormSaved(Result<Box<TodoTask>, FetchError>),
+    /// Carries the list the save was issued against (see `TaskDeleted`).
+    FormSaved(String, Result<Box<TodoTask>, FetchError>),
     ShowCompleted(bool),
     Retry,
     /// Periodic check for reminders that just came due.
@@ -383,16 +386,21 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::DeleteConfirmed(id) => return self.delete_task(id),
-            Message::TaskDeleted(task, Ok(())) => {
-                // Ensure it's gone even if a poll re-added it between remove and ack.
-                if let AppState::Ready(ready) = &mut self.state {
+            Message::TaskDeleted(list_id, task, Ok(())) => {
+                // Ensure it's gone even if a poll re-added it between remove and ack,
+                // but only on the list the delete targeted.
+                if let AppState::Ready(ready) = &mut self.state
+                    && ready.selected_list_id == list_id
+                {
                     ready.tasks.retain(|t| t.id != task.id);
                 }
             }
-            Message::TaskDeleted(task, Err(e)) => {
-                // Restore the optimistically-removed task, then route the typed error
-                // (auth-expiry/throttle handled by handle_fetch_error).
+            Message::TaskDeleted(list_id, task, Err(e)) => {
+                // Restore the optimistically-removed task, but only if still on its
+                // list, so a delete that failed after a list switch can't inject it
+                // into another list. Then route the typed error.
                 if let AppState::Ready(ready) = &mut self.state
+                    && ready.selected_list_id == list_id
                     && !ready.tasks.iter().any(|t| t.id == task.id)
                 {
                     ready.tasks.push(*task);
@@ -427,31 +435,35 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::SaveForm => return self.save_form(),
-            Message::FormSaved(Ok(task)) => {
-                // Apply the returned task immediately (the next poll reconciles the rest):
-                // replace by id on edit, push on create.
+            Message::FormSaved(list_id, Ok(task)) => {
+                // Apply the returned task immediately (the next poll reconciles the
+                // rest): replace by id on edit, push on create - but only if still on
+                // the list it was saved to. Either way the form is done.
                 if let AppState::Ready(ready) = &mut self.state {
-                    let id = task.id.clone();
-                    if let Some(existing) = ready.tasks.iter_mut().find(|t| t.id == id) {
-                        *existing = *task;
-                    } else {
-                        ready.tasks.push(*task);
+                    if ready.selected_list_id == list_id {
+                        let id = task.id.clone();
+                        if let Some(existing) = ready.tasks.iter_mut().find(|t| t.id == id) {
+                            *existing = *task;
+                        } else {
+                            ready.tasks.push(*task);
+                        }
                     }
                     ready.view = crate::state::PopupView::List;
                 }
             }
-            Message::FormSaved(Err(e)) => {
+            Message::FormSaved(_list_id, Err(e)) => {
                 log::error!("save failed: {e:?}");
-                // A request error (e.g. a Graph 400) carries the real reason in its
-                // body; show it in the form and keep the form open so it can be
-                // corrected and retried, rather than a generic "Save failed".
-                if let FetchError::Other(msg) = &e {
-                    if let AppState::Ready(ready) = &mut self.state
-                        && let crate::state::PopupView::Form(form) = &mut ready.view
-                    {
+                // Release the in-flight guard so the user can retry. A request error
+                // (e.g. a Graph 400) carries the real reason in its body; show it in
+                // the form and keep it open rather than a generic "Save failed".
+                if let AppState::Ready(ready) = &mut self.state
+                    && let crate::state::PopupView::Form(form) = &mut ready.view
+                {
+                    form.saving = false;
+                    if let FetchError::Other(msg) = &e {
                         form.error = Some(msg.clone());
+                        return Task::none();
                     }
-                    return Task::none();
                 }
                 // Auth-expiry and throttling keep their existing handling.
                 return self.handle_fetch_error(e);
@@ -978,9 +990,16 @@ impl AppModel {
         let removed = ready.tasks.remove(pos); // optimistic remove
         let list_id = ready.selected_list_id.clone();
         let carried = removed.clone();
+        let list_for_msg = list_id.clone();
         Task::perform(
             async move { graph.delete_task(&list_id, &task_id).await.map_err(classify_graph) },
-            move |r| cosmic::action::app(Message::TaskDeleted(Box::new(carried.clone()), r)),
+            move |r| {
+                cosmic::action::app(Message::TaskDeleted(
+                    list_for_msg.clone(),
+                    Box::new(carried.clone()),
+                    r,
+                ))
+            },
         )
     }
 
@@ -990,6 +1009,10 @@ impl AppModel {
         let tz = system_tz();
         let AppState::Ready(ready) = &mut self.state else { return Task::none() };
         let crate::state::PopupView::Form(form) = &mut ready.view else { return Task::none() };
+        // Suppress a re-submit while a save is already running (double-click guard).
+        if form.saving {
+            return Task::none();
+        }
         let input = match form.to_input(&tz) {
             Ok(i) => i,
             Err(msg) => {
@@ -997,8 +1020,11 @@ impl AppModel {
                 return Task::none();
             }
         };
+        form.saving = true;
+        form.error = None;
         let mode = form.mode.clone();
         let list_id = ready.selected_list_id.clone();
+        let list_for_msg = list_id.clone();
         Task::perform(
             async move {
                 match mode {
@@ -1014,7 +1040,7 @@ impl AppModel {
                         .map_err(classify_graph),
                 }
             },
-            |r| cosmic::action::app(Message::FormSaved(r)),
+            move |r| cosmic::action::app(Message::FormSaved(list_for_msg.clone(), r)),
         )
     }
 
