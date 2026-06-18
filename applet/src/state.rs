@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use outlook_tasks_core::models::{TaskStatus, TodoList, TodoTask};
@@ -29,8 +29,9 @@ pub enum AppState {
     /// Unrecoverable configuration error (e.g. a malformed client id/URL); shown
     /// instead of crashing, since the panel respawns a crashed applet.
     Error(String),
-    /// Signed in and showing data.
-    Ready(Ready),
+    /// Signed in and showing data. Boxed: `Ready` is much larger than the other
+    /// variants, so boxing keeps `AppState` small (as `PopupView` does for the form).
+    Ready(Box<Ready>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -63,6 +64,10 @@ pub struct Ready {
     /// the generation it was issued under and is discarded unless it still
     /// matches, so a slow load can't overwrite the result of a newer one.
     pub load_gen: u64,
+    /// Tasks with an in-flight status PATCH. Blocks a second toggle of the same
+    /// task until the first resolves, so two racing PATCHes can't land out of
+    /// order and leave the wrong status.
+    pub toggling: HashSet<String>,
 }
 
 impl Ready {
@@ -193,6 +198,17 @@ impl Ready {
         self.confirming_delete = None;
     }
 
+    /// Marks a task's status change as in flight. Returns false if one is
+    /// already in flight, in which case the caller should ignore the new toggle.
+    pub fn begin_toggle(&mut self, task_id: &str) -> bool {
+        self.toggling.insert(task_id.to_string())
+    }
+
+    /// Clears a task's in-flight status change once its PATCH has resolved.
+    pub fn end_toggle(&mut self, task_id: &str) {
+        self.toggling.remove(task_id);
+    }
+
     /// Bumps and returns the load generation, marking the start of a new full
     /// load. Responses tagged with an earlier generation are then stale.
     pub fn next_load_gen(&mut self) -> u64 {
@@ -217,6 +233,7 @@ impl Ready {
         self.loaded_more = false;
         self.confirming_delete = None;
         self.completing.clear();
+        self.toggling.clear();
         self.loading = true;
     }
 
@@ -457,6 +474,15 @@ mod tests {
         ready.cancel_completing("b");
         let visible: Vec<&str> = ready.visible_tasks().iter().map(|t| t.id.as_str()).collect();
         assert_eq!(visible, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn toggling_guard_blocks_reentrant_status_change() {
+        let mut ready = Ready::default();
+        assert!(ready.begin_toggle("a")); // first toggle proceeds
+        assert!(!ready.begin_toggle("a")); // second blocked while in flight
+        ready.end_toggle("a");
+        assert!(ready.begin_toggle("a")); // allowed again once it resolves
     }
 
     #[test]

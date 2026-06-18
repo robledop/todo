@@ -246,15 +246,17 @@ impl cosmic::Application for AppModel {
                             self.config.selected_list_id = Some(id.clone());
                             self.persist_config();
                         }
-                        self.state = AppState::Ready(Ready {
+                        self.state = AppState::Ready(Box::new(Ready {
                             lists,
                             selected_list_id: id.clone(),
                             loading: true,
                             ..Default::default()
-                        });
+                        }));
                         return self.load_tasks(id);
                     }
-                    None => self.state = AppState::Ready(Ready { lists, ..Default::default() }),
+                    None => {
+                        self.state = AppState::Ready(Box::new(Ready { lists, ..Default::default() }))
+                    }
                 }
             }
             Message::ListsLoaded(Err(e)) => return self.handle_fetch_error(e),
@@ -351,15 +353,17 @@ impl cosmic::Application for AppModel {
             }
 
             Message::ToggleTask(task_id) => return self.toggle_task(task_id),
-            Message::TaskUpdated(_id, _prev, Ok(updated)) => {
-                if let AppState::Ready(ready) = &mut self.state
-                    && let Some(t) = ready.tasks.iter_mut().find(|t| t.id == updated.id)
-                {
-                    *t = *updated;
+            Message::TaskUpdated(id, _prev, Ok(updated)) => {
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.end_toggle(&id);
+                    if let Some(t) = ready.tasks.iter_mut().find(|t| t.id == updated.id) {
+                        *t = *updated;
+                    }
                 }
             }
             Message::TaskUpdated(task_id, prev, Err(e)) => {
                 if let AppState::Ready(ready) = &mut self.state {
+                    ready.end_toggle(&task_id);
                     ready.restore_status(&task_id, prev);
                     // A failed completion must reappear, not animate away.
                     ready.cancel_completing(&task_id);
@@ -816,7 +820,7 @@ impl AppModel {
     fn apply_outcome(&mut self, outcome: BootstrapOutcome) -> Task<cosmic::Action<Message>> {
         match outcome {
             BootstrapOutcome::Ready => {
-                self.state = AppState::Ready(Ready { loading: true, ..Default::default() });
+                self.state = AppState::Ready(Box::new(Ready { loading: true, ..Default::default() }));
                 self.load_lists()
             }
             BootstrapOutcome::SignedOut => {
@@ -958,11 +962,14 @@ impl AppModel {
         let AppState::Ready(ready) = &mut self.state else {
             return Task::none();
         };
-        // Ignore a re-toggle while the row is still playing its exit animation.
-        if ready.is_completing(&task_id) {
+        // Ignore a re-toggle while the row is animating out, or while a status
+        // PATCH for it is already in flight, so racing PATCHes can't resolve out
+        // of order and leave the wrong status.
+        if ready.is_completing(&task_id) || !ready.begin_toggle(&task_id) {
             return Task::none();
         }
         let Some(prev) = ready.toggle_optimistic(&task_id) else {
+            ready.end_toggle(&task_id); // nothing to toggle; release the guard
             return Task::none();
         };
         let new_status = if prev == TaskStatus::Completed {
