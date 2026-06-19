@@ -50,6 +50,11 @@ pub struct TaskForm {
     /// A save request is in flight; suppresses re-submits so a double-click
     /// can't create the task twice.
     pub saving: bool,
+    /// A recurrence the form can't represent (an `Unknown` pattern from Graph),
+    /// kept verbatim so saving an edit preserves it instead of nulling it out.
+    /// Set only by `from_task`; cleared the moment the user touches the repeat
+    /// control, which is taken as intent to redefine the recurrence.
+    pub preserved_recurrence: Option<PatternedRecurrence>,
 
     // View-only picker state (not part of to_input/from_task), but it participates
     // in PartialEq/Eq - fine, CalendarModel is Eq.
@@ -79,6 +84,7 @@ impl Default for TaskForm {
             reminder_time: "09:00".into(),
             error: None,
             saving: false,
+            preserved_recurrence: None,
             due_open: false,
             due_cal: cosmic::widget::calendar::CalendarModel::now(),
             reminder_open: false,
@@ -115,7 +121,9 @@ impl TaskForm {
         };
 
         let due = self.due.as_ref().map(|d| day_to_dtz(d, tz));
-        let recurrence = self.build_recurrence();
+        // Fall back to a preserved, unrepresentable recurrence so an edit doesn't
+        // clear it; cleared once the user touches the repeat control.
+        let recurrence = self.build_recurrence().or_else(|| self.preserved_recurrence.clone());
 
         Ok(TaskInput { title: title.to_string(), importance: self.importance, due, recurrence, reminder })
     }
@@ -233,10 +241,12 @@ impl TaskForm {
 
     fn apply_recurrence(&mut self, rec: &PatternedRecurrence) {
         use RecurrencePatternType as PT;
-        // An unrecognized pattern can't be represented in the form; leave repeat None
-        // (saving the edit will then drop the unknown recurrence - acceptable for v1).
+        // An unrecognized pattern can't be represented in the form; leave repeat
+        // None but keep the original so saving the edit preserves it rather than
+        // clearing it (it is reused in `to_input` unless the user edits recurrence).
         if rec.pattern.pattern_type == PT::Unknown {
             self.repeat = RepeatKind::None;
+            self.preserved_recurrence = Some(rec.clone());
             return;
         }
         self.interval = rec.pattern.interval.max(1);
@@ -338,7 +348,11 @@ impl TaskForm {
             FormMsg::DuePrevMonth => self.due_cal.show_prev_month(),
             FormMsg::DueNextMonth => self.due_cal.show_next_month(),
             FormMsg::DueCleared => self.due = None,
-            FormMsg::Repeat(r) => self.repeat = r,
+            FormMsg::Repeat(r) => {
+                self.repeat = r;
+                // The user is redefining recurrence; drop any preserved original.
+                self.preserved_recurrence = None;
+            }
             FormMsg::Interval(s) => self.interval = s.parse().unwrap_or(self.interval).max(1),
             FormMsg::Weekday(i, on) => {
                 if i < 7 {
@@ -1060,5 +1074,35 @@ mod tests {
         };
         let form = TaskForm::from_task(&task_with(Some(rec), "2026-06-20"));
         assert_eq!(form.repeat, RepeatKind::None);
+    }
+
+    #[test]
+    fn unknown_recurrence_is_preserved_unless_user_edits_repeat() {
+        use outlook_tasks_core::models::{RecurrencePatternType, RecurrenceRangeType};
+        let rec = PatternedRecurrence {
+            pattern: RecurrencePattern {
+                pattern_type: RecurrencePatternType::Unknown,
+                interval: 1,
+                month: None,
+                day_of_month: None,
+                days_of_week: vec![],
+                first_day_of_week: None,
+                index: None,
+            },
+            range: RecurrenceRange {
+                range_type: RecurrenceRangeType::NoEnd,
+                start_date: "2026-06-20".into(),
+                end_date: None,
+                number_of_occurrences: None,
+                recurrence_time_zone: None,
+            },
+        };
+        // Untouched: saving an edit preserves the unrepresentable recurrence.
+        let form = TaskForm::from_task(&task_with(Some(rec.clone()), "2026-06-20"));
+        assert!(form.to_input("UTC").unwrap().recurrence.is_some());
+        // Touching the repeat control discards it, so the edit can clear recurrence.
+        let mut edited = TaskForm::from_task(&task_with(Some(rec), "2026-06-20"));
+        edited.apply(FormMsg::Repeat(RepeatKind::None));
+        assert!(edited.to_input("UTC").unwrap().recurrence.is_none());
     }
 }
