@@ -40,8 +40,9 @@ pub struct AppModel {
     config: Config,
     state: AppState,
     services: Option<Services>,
-    /// Timestamp of the last reminder check; `None` until the first tick sets the
-    /// baseline so reminders from before startup don't fire.
+    /// Timestamp of the last reminder check, seeded at startup so the first tick
+    /// already covers the window since launch - without replaying reminders from
+    /// before startup (those fall before the seed).
     reminder_last_check: Option<jiff::Timestamp>,
 }
 
@@ -161,7 +162,7 @@ impl cosmic::Application for AppModel {
             config,
             state,
             services,
-            reminder_last_check: None,
+            reminder_last_check: Some(jiff::Timestamp::now()),
         };
         (model, startup)
     }
@@ -740,13 +741,12 @@ impl AppModel {
     }
 
     /// Fires notifications for reminders that crossed their time since the last
-    /// check. The first call only records a baseline. Catch-up is capped by
-    /// `REMINDER_GRACE` so reminders missed while closed/asleep aren't replayed.
+    /// check. The baseline is seeded at startup, so even the first tick covers the
+    /// window since launch. Catch-up is capped by `REMINDER_GRACE` so reminders
+    /// missed while closed/asleep aren't replayed.
     fn check_reminders(&mut self) -> Task<cosmic::Action<Message>> {
         let now = jiff::Timestamp::now();
-        let Some(last) = self.reminder_last_check.replace(now) else {
-            return Task::none();
-        };
+        let last = self.reminder_last_check.replace(now).unwrap_or(now);
         let floor = jiff::Timestamp::from_second(now.as_second() - REMINDER_GRACE_SECS).unwrap_or(now);
         let lower = last.max(floor);
         let AppState::Ready(ready) = &self.state else {
