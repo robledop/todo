@@ -19,10 +19,106 @@ pub fn reminder_instant(task: &TodoTask) -> Option<Timestamp> {
     let civil = dtz.date_time.get(..19).unwrap_or(dtz.date_time.as_str());
     let dt: jiff::civil::DateTime = civil.parse().ok()?;
     let tz = match dtz.time_zone.as_deref() {
-        Some(name) => jiff::tz::TimeZone::get(name).ok()?,
+        Some(name) => resolve_zone(name)?,
         None => jiff::tz::TimeZone::system(),
     };
     dt.to_zoned(tz).ok().map(|z| z.timestamp())
+}
+
+/// Resolves a stored zone name to a `TimeZone`. IANA names resolve directly;
+/// Windows zone names (as Outlook stores them, e.g. "Pacific Standard Time")
+/// are mapped to their IANA equivalent first, so reminders created in Outlook
+/// still fire instead of silently failing to parse.
+fn resolve_zone(name: &str) -> Option<jiff::tz::TimeZone> {
+    if let Ok(tz) = jiff::tz::TimeZone::get(name) {
+        return Some(tz);
+    }
+    jiff::tz::TimeZone::get(windows_to_iana(name)?).ok()
+}
+
+/// Maps a Windows time-zone id to its primary IANA zone (the CLDR `windowsZones`
+/// "001" default). Covers the populated zones; an unmapped name yields `None`.
+fn windows_to_iana(name: &str) -> Option<&'static str> {
+    let iana = match name {
+        "Dateline Standard Time" => "Etc/GMT+12",
+        "UTC-11" => "Etc/GMT+11",
+        "Hawaiian Standard Time" => "Pacific/Honolulu",
+        "Alaskan Standard Time" => "America/Anchorage",
+        "Pacific Standard Time (Mexico)" => "America/Tijuana",
+        "Pacific Standard Time" => "America/Los_Angeles",
+        "US Mountain Standard Time" => "America/Phoenix",
+        "Mountain Standard Time (Mexico)" => "America/Chihuahua",
+        "Mountain Standard Time" => "America/Denver",
+        "Central America Standard Time" => "America/Guatemala",
+        "Central Standard Time" => "America/Chicago",
+        "Central Standard Time (Mexico)" => "America/Mexico_City",
+        "Canada Central Standard Time" => "America/Regina",
+        "SA Pacific Standard Time" => "America/Bogota",
+        "Eastern Standard Time" => "America/New_York",
+        "US Eastern Standard Time" => "America/Indiana/Indianapolis",
+        "Venezuela Standard Time" => "America/Caracas",
+        "Atlantic Standard Time" => "America/Halifax",
+        "SA Western Standard Time" => "America/La_Paz",
+        "Newfoundland Standard Time" => "America/St_Johns",
+        "E. South America Standard Time" => "America/Sao_Paulo",
+        "Argentina Standard Time" => "America/Argentina/Buenos_Aires",
+        "SA Eastern Standard Time" => "America/Cayenne",
+        "Greenland Standard Time" => "America/Godthab",
+        "UTC" => "Etc/UTC",
+        "Cape Verde Standard Time" => "Atlantic/Cape_Verde",
+        "Morocco Standard Time" => "Africa/Casablanca",
+        "GMT Standard Time" => "Europe/London",
+        "Greenwich Standard Time" => "Atlantic/Reykjavik",
+        "W. Europe Standard Time" => "Europe/Berlin",
+        "Central Europe Standard Time" => "Europe/Budapest",
+        "Romance Standard Time" => "Europe/Paris",
+        "Central European Standard Time" => "Europe/Warsaw",
+        "W. Central Africa Standard Time" => "Africa/Lagos",
+        "GTB Standard Time" => "Europe/Bucharest",
+        "E. Europe Standard Time" => "Europe/Chisinau",
+        "Egypt Standard Time" => "Africa/Cairo",
+        "South Africa Standard Time" => "Africa/Johannesburg",
+        "FLE Standard Time" => "Europe/Kiev",
+        "Israel Standard Time" => "Asia/Jerusalem",
+        "Turkey Standard Time" => "Europe/Istanbul",
+        "Belarus Standard Time" => "Europe/Minsk",
+        "Arabic Standard Time" => "Asia/Baghdad",
+        "Arab Standard Time" => "Asia/Riyadh",
+        "Russian Standard Time" => "Europe/Moscow",
+        "E. Africa Standard Time" => "Africa/Nairobi",
+        "Iran Standard Time" => "Asia/Tehran",
+        "Arabian Standard Time" => "Asia/Dubai",
+        "Azerbaijan Standard Time" => "Asia/Baku",
+        "Caucasus Standard Time" => "Asia/Yerevan",
+        "Afghanistan Standard Time" => "Asia/Kabul",
+        "West Asia Standard Time" => "Asia/Tashkent",
+        "Pakistan Standard Time" => "Asia/Karachi",
+        "India Standard Time" => "Asia/Kolkata",
+        "Sri Lanka Standard Time" => "Asia/Colombo",
+        "Nepal Standard Time" => "Asia/Kathmandu",
+        "Central Asia Standard Time" => "Asia/Almaty",
+        "Bangladesh Standard Time" => "Asia/Dhaka",
+        "Myanmar Standard Time" => "Asia/Yangon",
+        "SE Asia Standard Time" => "Asia/Bangkok",
+        "China Standard Time" => "Asia/Shanghai",
+        "Singapore Standard Time" => "Asia/Singapore",
+        "Taipei Standard Time" => "Asia/Taipei",
+        "W. Australia Standard Time" => "Australia/Perth",
+        "Korea Standard Time" => "Asia/Seoul",
+        "Tokyo Standard Time" => "Asia/Tokyo",
+        "Cen. Australia Standard Time" => "Australia/Adelaide",
+        "AUS Central Standard Time" => "Australia/Darwin",
+        "E. Australia Standard Time" => "Australia/Brisbane",
+        "AUS Eastern Standard Time" => "Australia/Sydney",
+        "Tasmania Standard Time" => "Australia/Hobart",
+        "West Pacific Standard Time" => "Pacific/Port_Moresby",
+        "Central Pacific Standard Time" => "Pacific/Guadalcanal",
+        "New Zealand Standard Time" => "Pacific/Auckland",
+        "Fiji Standard Time" => "Pacific/Fiji",
+        "Tonga Standard Time" => "Pacific/Tongatapu",
+        _ => return None,
+    };
+    Some(iana)
 }
 
 /// Tasks whose reminder instant falls in the half-open window `(lower, now]` and
@@ -70,6 +166,30 @@ mod tests {
     fn instant_handles_utc() {
         let t = reminder(true, "2026-06-15T09:00:00.0000000", Some("UTC"), TaskStatus::NotStarted);
         assert_eq!(reminder_instant(&t), Some(ts("2026-06-15T09:00:00Z")));
+    }
+
+    #[test]
+    fn instant_resolves_windows_zone_name() {
+        // Outlook stores the Windows id "Pacific Standard Time"; 2026-06-15 is in
+        // PDT (UTC-7), so 09:00 local resolves to 16:00 UTC.
+        let t = reminder(
+            true,
+            "2026-06-15T09:00:00.0000000",
+            Some("Pacific Standard Time"),
+            TaskStatus::NotStarted,
+        );
+        assert_eq!(reminder_instant(&t), Some(ts("2026-06-15T16:00:00Z")));
+    }
+
+    #[test]
+    fn instant_none_on_unknown_windows_zone() {
+        let t = reminder(
+            true,
+            "2026-06-15T09:00:00",
+            Some("Narnia Standard Time"),
+            TaskStatus::NotStarted,
+        );
+        assert_eq!(reminder_instant(&t), None);
     }
 
     #[test]
