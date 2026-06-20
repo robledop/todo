@@ -37,6 +37,11 @@ impl AuthConfig {
             auth_url: "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize".into(),
             token_url: "https://login.microsoftonline.com/consumers/oauth2/v2.0/token".into(),
             redirect_url: redirect_url.into(),
+            // `Tasks.ReadWrite` for the data, `offline_access` for a refresh
+            // token. `openid` is requested for Microsoft's consent/refresh
+            // behavior only - the returned id_token is intentionally never parsed
+            // or trusted (auth decisions use the Graph access token alone), so no
+            // nonce/id_token validation is required.
             scopes: vec![
                 "Tasks.ReadWrite".into(),
                 "offline_access".into(),

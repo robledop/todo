@@ -216,7 +216,20 @@ fn same_graph_origin(base: &str, candidate: &str) -> bool {
     next.scheme() == base.scheme()
         && next.host_str() == base.host_str()
         && next.port_or_known_default() == base.port_or_known_default()
-        && next.path().starts_with(base.path())
+        && path_within(base.path(), next.path())
+}
+
+/// True if `next_path` is `base_path` or a path nested under it. Unlike a raw
+/// `starts_with`, this requires a path boundary so a sibling such as `/v1.0foo`
+/// does not pass for a base of `/v1.0`.
+fn path_within(base_path: &str, next_path: &str) -> bool {
+    if next_path == base_path {
+        return true;
+    }
+    match next_path.strip_prefix(base_path) {
+        Some(rest) => base_path.ends_with('/') || rest.starts_with('/'),
+        None => false,
+    }
 }
 
 /// Percent-encodes an opaque Graph id for safe use as a single URL path segment.
@@ -272,7 +285,19 @@ async fn map_status(resp: reqwest::Response) -> Result<reqwest::Response, GraphE
 
 #[cfg(test)]
 mod tests {
-    use super::seg;
+    use super::{same_graph_origin, seg};
+
+    #[test]
+    fn same_origin_requires_a_path_boundary() {
+        let base = "https://graph.microsoft.com/v1.0";
+        assert!(same_graph_origin(base, "https://graph.microsoft.com/v1.0/me/todo/lists"));
+        assert!(same_graph_origin(base, "https://graph.microsoft.com/v1.0"));
+        // A sibling that only shares the prefix string must be rejected.
+        assert!(!same_graph_origin(base, "https://graph.microsoft.com/v1.0foo/evil"));
+        // Different host / scheme are rejected too.
+        assert!(!same_graph_origin(base, "https://evil.example/v1.0/me"));
+        assert!(!same_graph_origin(base, "http://graph.microsoft.com/v1.0/me"));
+    }
 
     #[test]
     fn seg_preserves_base64url_id_characters() {
