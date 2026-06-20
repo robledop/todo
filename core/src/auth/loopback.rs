@@ -2,8 +2,12 @@ use std::time::{Duration, Instant};
 
 use tiny_http::{Header, Request, Response, Server};
 
-use crate::auth::oauth::{parse_redirect, RedirectParams};
+use crate::auth::oauth::{constant_time_eq, parse_redirect, RedirectParams};
 use crate::error::AuthError;
+
+/// Cap on the request-target length we'll parse; a real OAuth callback is well
+/// under this, so anything larger is junk traffic we ignore.
+const MAX_TARGET_LEN: usize = 8192;
 
 const SUCCESS_HTML: &str = "<html><body style=\"font-family:sans-serif\">\
     <h3>Signed in to Outlook Tasks</h3>\
@@ -59,8 +63,16 @@ impl LoopbackServer {
                     Some(r) => r,
                     None => return Err(AuthError::Protocol("sign-in timed out".into())),
                 };
+                // Only a GET to the exact redirect path can be our callback; other
+                // methods/paths/oversized targets are unrelated local traffic.
+                if !is_callback_request(&request) {
+                    respond(request, NEUTRAL_HTML);
+                    continue;
+                }
                 match parse_redirect(request.url()) {
-                    Ok(params) if params.state == expected_state => {
+                    // Constant-time state check: don't leak the expected state via
+                    // comparison timing to a local process probing the port.
+                    Ok(params) if constant_time_eq(&params.state, &expected_state) => {
                         respond(request, SUCCESS_HTML);
                         return Ok(params);
                     }
@@ -73,6 +85,20 @@ impl LoopbackServer {
         .await
         .map_err(|e| AuthError::Protocol(e.to_string()))?
     }
+}
+
+/// True only for a GET to the exact redirect path (`/...`) within the length
+/// cap - the shape a browser's OAuth callback takes.
+fn is_callback_request(request: &Request) -> bool {
+    if !matches!(request.method(), tiny_http::Method::Get) {
+        return false;
+    }
+    let target = request.url();
+    if target.len() > MAX_TARGET_LEN {
+        return false;
+    }
+    let path = target.split('?').next().unwrap_or(target);
+    path == "/"
 }
 
 fn respond(request: Request, html: &str) {

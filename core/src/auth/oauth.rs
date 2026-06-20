@@ -154,7 +154,7 @@ fn token_set_from(resp: &BasicTokenResponse) -> TokenSet {
 }
 
 /// Length-independent byte comparison to avoid a timing oracle on the CSRF state.
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;

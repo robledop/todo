@@ -37,6 +37,28 @@ async fn loopback_ignores_wrong_state_then_accepts_match() {
 }
 
 #[tokio::test]
+async fn loopback_ignores_non_get_and_wrong_path() {
+    let server = LoopbackServer::bind().unwrap();
+    let redirect = server.redirect_url();
+    let handle =
+        tokio::spawn(async move { server.wait_for_code("good".into(), Duration::from_secs(5)).await });
+
+    // A POST (even with the right state) is not our callback shape: ignored.
+    let _ = reqwest::Client::new()
+        .post(format!("{redirect}?code=x&state=good"))
+        .send()
+        .await
+        .unwrap();
+    // A GET to a different path is ignored.
+    let _ = reqwest::get(format!("{redirect}other?code=x&state=good")).await.unwrap();
+    // The genuine GET to "/" then succeeds.
+    let _ = reqwest::get(format!("{redirect}?code=real&state=good")).await.unwrap();
+
+    let params = handle.await.unwrap().unwrap();
+    assert_eq!(params.code, "real");
+}
+
+#[tokio::test]
 async fn loopback_times_out_without_redirect() {
     let server = LoopbackServer::bind().unwrap();
     let err = server.wait_for_code("s".into(), Duration::from_millis(150)).await.unwrap_err();
