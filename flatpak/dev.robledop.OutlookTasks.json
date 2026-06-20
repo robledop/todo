@@ -13,6 +13,7 @@
     "--share=ipc",
     "--share=network",
     "--talk-name=com.system76.CosmicSettingsDaemon",
+    "--talk-name=org.freedesktop.Notifications",
     "--filesystem=xdg-config/cosmic:rw"
   ],
   "build-options": {
