@@ -277,10 +277,26 @@ async fn map_status(resp: reqwest::Response) -> Result<reqwest::Response, GraphE
             Err(GraphError::Throttled { retry_after })
         }
         other => {
-            let body = resp.text().await.unwrap_or_default();
+            let mut body = resp.text().await.unwrap_or_default();
+            bound_error_body(&mut body);
             Err(GraphError::Http { status: other.as_u16(), body })
         }
     }
+}
+
+/// Caps a Graph error body so an unexpectedly large or junk response can't bloat
+/// logs or the UI. Graph error payloads are small JSON objects, well under this.
+fn bound_error_body(body: &mut String) {
+    const MAX_BODY: usize = 2048;
+    if body.len() <= MAX_BODY {
+        return;
+    }
+    let mut end = MAX_BODY;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    body.truncate(end);
+    body.push_str("...(truncated)");
 }
 
 #[cfg(test)]

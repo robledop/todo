@@ -382,3 +382,26 @@ async fn list_tasks_page_rejects_foreign_next_link() {
     assert!(matches!(err, outlook_tasks_core::GraphError::Decode(_)));
     assert_eq!(server.received_requests().await.unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn http_error_body_is_bounded() {
+    // A pathologically large error body must be capped before it reaches logs/UI.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("x".repeat(10_000)))
+        .mount(&server)
+        .await;
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("t".to_string())),
+    );
+    match client.list_lists().await.unwrap_err() {
+        outlook_tasks_core::GraphError::Http { status, body } => {
+            assert_eq!(status, 400);
+            assert!(body.len() < 3000, "error body should be bounded, got {}", body.len());
+        }
+        other => panic!("expected Http error, got {other:?}"),
+    }
+}
