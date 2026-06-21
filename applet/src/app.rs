@@ -44,6 +44,9 @@ pub struct AppModel {
     /// already covers the window since launch - without replaying reminders from
     /// before startup (those fall before the seed).
     reminder_last_check: Option<jiff::Timestamp>,
+    /// A throttle (429) retry is already scheduled; suppresses stacking another
+    /// timer when more requests come back throttled before it fires.
+    retry_scheduled: bool,
 }
 
 /// Classified outcome of a Graph call, so the UI can react to auth-expiry and
@@ -117,6 +120,8 @@ pub enum Message {
     FormSaved(String, Result<Box<TodoTask>, FetchError>),
     ShowCompleted(bool),
     Retry,
+    /// A throttle backoff elapsed; clear the pending-retry flag and reload.
+    RetryNow,
     /// Periodic check for reminders that just came due.
     ReminderTick,
     /// Result of firing one reminder notification (logged on failure).
@@ -163,6 +168,7 @@ impl cosmic::Application for AppModel {
             state,
             services,
             reminder_last_check: Some(jiff::Timestamp::now()),
+            retry_scheduled: false,
         };
         (model, startup)
     }
@@ -226,6 +232,14 @@ impl cosmic::Application for AppModel {
             Message::Retry => {
                 self.state = AppState::Bootstrapping;
                 return self.rebootstrap();
+            }
+            Message::RetryNow => {
+                self.retry_scheduled = false;
+                if let AppState::Ready(ready) = &self.state
+                    && !ready.selected_list_id.is_empty()
+                {
+                    return self.load_tasks(ready.selected_list_id.clone());
+                }
             }
 
             Message::SignIn => {
@@ -845,11 +859,11 @@ impl AppModel {
         })
     }
 
-    /// Schedules a single delayed refresh (honors a 429 Retry-After).
+    /// Schedules a single delayed reload (honors a 429 Retry-After).
     fn schedule_retry(&self, secs: u64) -> Task<cosmic::Action<Message>> {
         let wait = std::time::Duration::from_secs(secs.clamp(1, 3600));
         Task::perform(async move { tokio::time::sleep(wait).await }, |_| {
-            cosmic::action::app(Message::Refresh)
+            cosmic::action::app(Message::RetryNow)
         })
     }
 
@@ -867,6 +881,12 @@ impl AppModel {
                     ready.loading = false;
                     ready.error = Some(format!("Rate limited - retrying in {wait}s"));
                 }
+                // Only one backoff timer at a time; more throttles just update the
+                // message rather than stacking another reload.
+                if self.retry_scheduled {
+                    return Task::none();
+                }
+                self.retry_scheduled = true;
                 self.schedule_retry(wait)
             }
             FetchError::Other(msg) => {
