@@ -2,17 +2,18 @@
 //! For every task variation it creates a task titled "Test", verifies the server
 //! persisted it as sent, and deletes it again - so the account is left clean.
 //!
-//! It mutates the signed-in account, so it is OPT-IN: it does nothing unless
-//! `RUN_GRAPH_INTEGRATION` is set. To run it (signed in via the applet, so a
-//! refresh token is in the Secret Service):
+//! It mutates the signed-in account, so it skips under CI (which has no keyring
+//! or sign-in). Locally it runs whenever a client id and a stored sign-in are
+//! present - run it signed in via the applet, so a refresh token is in the
+//! Secret Service:
 //!
 //! ```sh
-//! RUN_GRAPH_INTEGRATION=1 OUTLOOK_TASKS_CLIENT_ID=<your-client-id> \
+//! OUTLOOK_TASKS_CLIENT_ID=<your-client-id> \
 //!   cargo test -p outlook-tasks-core --test graph_integration -- --nocapture
 //! ```
 //!
-//! It auto-skips (printing why) when the opt-in flag or client id is missing, or
-//! when there is no stored sign-in.
+//! It auto-skips (printing why) under CI, or when the client id or the stored
+//! sign-in is missing.
 
 use std::sync::Arc;
 
@@ -31,8 +32,8 @@ const DUE: &str = "2026-06-17";
 
 #[tokio::test]
 async fn create_verify_delete_all_task_variations() {
-    if std::env::var_os("RUN_GRAPH_INTEGRATION").is_none() {
-        eprintln!("skipping: set RUN_GRAPH_INTEGRATION=1 to run the live Graph integration test");
+    if std::env::var_os("CI").is_some() {
+        eprintln!("skipping: live Graph integration test does not run under CI");
         return;
     }
     let Ok(client_id) = std::env::var("OUTLOOK_TASKS_CLIENT_ID") else {
