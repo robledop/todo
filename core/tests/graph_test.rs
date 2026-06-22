@@ -533,3 +533,98 @@ async fn update_task_preserves_relative_recurrence_via_outlook() {
         RecurrencePatternType::RelativeMonthly
     );
 }
+
+#[tokio::test]
+async fn create_task_rolls_back_when_outlook_unavailable() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/me/todo/lists/L1/tasks"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"T1","title":"Test","status":"notStarted"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // The Outlook endpoint is unavailable.
+    Mock::given(method("PATCH"))
+        .and(path("/me/outlook/tasks/T1"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // The just-created task is rolled back so a retry can't duplicate it.
+    Mock::given(method("DELETE"))
+        .and(path("/me/todo/lists/L1/tasks/T1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        Arc::new(StaticTokenProvider("test-token".to_string())),
+    );
+    let err = client.create_task("L1", &relative_monthly_input()).await.unwrap_err();
+    assert!(matches!(err, outlook_tasks_core::GraphError::RecurrenceUnavailable));
+}
+
+#[tokio::test]
+async fn update_task_reports_when_outlook_unavailable() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/me/todo/lists/L1/tasks/T1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"T1","title":"Test","status":"notStarted"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/me/outlook/tasks/T1"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // No DELETE: an update keeps its other field changes (no rollback).
+    Mock::given(method("DELETE"))
+        .and(path("/me/todo/lists/L1/tasks/T1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        Arc::new(StaticTokenProvider("test-token".to_string())),
+    );
+    let err = client.update_task("L1", "T1", &relative_monthly_input()).await.unwrap_err();
+    assert!(matches!(err, outlook_tasks_core::GraphError::RecurrenceUnavailable));
+}
+
+#[tokio::test]
+async fn update_task_skips_outlook_when_recurrence_unchanged() {
+    let server = MockServer::start().await;
+    // The To Do update returns the task already carrying the same relative pattern.
+    Mock::given(method("PATCH"))
+        .and(path("/me/todo/lists/L1/tasks/T1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(relative_task_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // So the Outlook endpoint must NOT be touched (an outage can't break this edit).
+    Mock::given(method("PATCH"))
+        .and(path("/me/outlook/tasks/T1"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        Arc::new(StaticTokenProvider("test-token".to_string())),
+    );
+    let task = client.update_task("L1", "T1", &relative_monthly_input()).await.unwrap();
+    assert_eq!(
+        task.recurrence.unwrap().pattern.pattern_type,
+        RecurrencePatternType::RelativeMonthly
+    );
+}

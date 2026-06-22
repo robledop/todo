@@ -35,6 +35,14 @@ pub enum GraphError {
     Network(String),
     #[error("decode error: {0}")]
     Decode(String),
+    /// A relative ("Nth weekday") recurrence couldn't be written because the
+    /// Outlook endpoint that stores it (the To Do endpoint can't) was unavailable.
+    /// User-facing: surfaced verbatim in the task form.
+    #[error(
+        "Couldn't save the \"Nth weekday\" repeat - that service is unavailable right now. \
+         Pick a different repeat option, or try again later."
+    )]
+    RecurrenceUnavailable,
 }
 
 /// Errors from the secret-storage layer.

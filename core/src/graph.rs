@@ -7,7 +7,8 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{AuthError, GraphError};
 use crate::models::{
-    GraphCollection, PatternedRecurrence, TaskInput, TaskStatus, TodoList, TodoTask, UpdateTaskStatus,
+    GraphCollection, PatternedRecurrence, RecurrencePatternType, TaskInput, TaskStatus, TodoList,
+    TodoTask, UpdateTaskStatus,
 };
 
 /// Supplies bearer access tokens to the Graph client and refreshes them on demand.
@@ -88,7 +89,7 @@ impl GraphClient {
         let relative = take_relative(input, &mut body);
         let resp = self.execute(Method::POST, &url, Some(body)).await?;
         let task = resp.json::<TodoTask>().await.map_err(|e| GraphError::Decode(e.to_string()))?;
-        self.finish_with_recurrence(list_id, task, relative).await
+        self.finish_with_recurrence(list_id, task, relative, true).await
     }
 
     /// Updates a task's editable fields (PATCH).
@@ -104,7 +105,7 @@ impl GraphClient {
         let relative = take_relative(input, &mut body);
         let resp = self.execute(Method::PATCH, &url, Some(body)).await?;
         let task = resp.json::<TodoTask>().await.map_err(|e| GraphError::Decode(e.to_string()))?;
-        self.finish_with_recurrence(list_id, task, relative).await
+        self.finish_with_recurrence(list_id, task, relative, false).await
     }
 
     /// GETs a single task by id.
@@ -124,13 +125,27 @@ impl GraphClient {
         list_id: &str,
         task: TodoTask,
         relative: Option<PatternedRecurrence>,
+        created: bool,
     ) -> Result<TodoTask, GraphError> {
-        match relative {
-            Some(rec) => {
-                self.set_outlook_recurrence(&task.id, &rec).await?;
-                self.get_task(list_id, &task.id).await
+        let Some(rec) = relative else { return Ok(task) };
+        // The To Do write left any existing recurrence intact; if it already
+        // matches what we want (an edit that didn't change the schedule), there's
+        // nothing to write via Outlook - so a beta outage can't break that edit.
+        if relative_recurrence_matches(task.recurrence.as_ref(), &rec) {
+            return Ok(task);
+        }
+        match self.set_outlook_recurrence(&task.id, &rec).await {
+            Ok(()) => self.get_task(list_id, &task.id).await,
+            Err(e) => {
+                log::warn!("Outlook recurrence write failed, falling back: {e}");
+                // Roll back a just-created task so a retry can't duplicate it; an
+                // update keeps its other field changes. Either way the caller gets
+                // a clear, user-facing error instead of a silent daily downgrade.
+                if created {
+                    let _ = self.delete_task(list_id, &task.id).await;
+                }
+                Err(GraphError::RecurrenceUnavailable)
             }
-            None => Ok(task),
         }
     }
 
@@ -287,6 +302,30 @@ fn path_within(base_path: &str, next_path: &str) -> bool {
         Some(rest) => base_path.ends_with('/') || rest.starts_with('/'),
         None => false,
     }
+}
+
+/// True if `current` already holds the same relative pattern as `desired`,
+/// comparing only the fields meaningful to the pattern type (the server fills the
+/// others with zero/defaults that the form leaves unset). Lets an edit that
+/// didn't change the schedule skip the Outlook write entirely.
+fn relative_recurrence_matches(
+    current: Option<&PatternedRecurrence>,
+    desired: &PatternedRecurrence,
+) -> bool {
+    let Some(cur) = current else { return false };
+    let (c, d) = (&cur.pattern, &desired.pattern);
+    if c.pattern_type != d.pattern_type {
+        return false;
+    }
+    let mut cur_days: Vec<&str> = c.days_of_week.iter().map(String::as_str).collect();
+    let mut want_days: Vec<&str> = d.days_of_week.iter().map(String::as_str).collect();
+    cur_days.sort_unstable();
+    want_days.sort_unstable();
+    // `month` only matters for relativeYearly; relativeMonthly leaves it unset
+    // while the server echoes 0.
+    let month_matches =
+        d.pattern_type != RecurrencePatternType::RelativeYearly || c.month == d.month;
+    c.interval == d.interval && c.index == d.index && cur_days == want_days && month_matches
 }
 
 /// If `input`'s recurrence is a relative ("Nth weekday") pattern, removes it from
