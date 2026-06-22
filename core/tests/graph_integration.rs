@@ -198,7 +198,9 @@ fn variations() -> Vec<Case> {
                 want("importance", t.importance, Importance::High)?;
                 want_pattern(t, RecurrencePatternType::RelativeMonthly)?;
                 want("isReminderOn", t.is_reminder_on, true)?;
-                want("due date", due_date(t), Some(DUE.to_string()))
+                // A relative recurrence makes Graph move the due to the next
+                // occurrence, so just assert one is present rather than its value.
+                want("has due", t.due_date_time.is_some(), true)
             }),
         },
     ]

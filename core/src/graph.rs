@@ -6,7 +6,9 @@ use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 
 use crate::error::{AuthError, GraphError};
-use crate::models::{GraphCollection, TaskInput, TaskStatus, TodoList, TodoTask, UpdateTaskStatus};
+use crate::models::{
+    GraphCollection, PatternedRecurrence, TaskInput, TaskStatus, TodoList, TodoTask, UpdateTaskStatus,
+};
 
 /// Supplies bearer access tokens to the Graph client and refreshes them on demand.
 #[async_trait]
@@ -82,8 +84,11 @@ impl GraphClient {
     /// Creates a task in a list from the given input.
     pub async fn create_task(&self, list_id: &str, input: &TaskInput) -> Result<TodoTask, GraphError> {
         let url = format!("{}/me/todo/lists/{}/tasks", self.base_url, seg(list_id));
-        let resp = self.execute(Method::POST, &url, Some(input.to_body(false))).await?;
-        resp.json::<TodoTask>().await.map_err(|e| GraphError::Decode(e.to_string()))
+        let mut body = input.to_body(false);
+        let relative = take_relative(input, &mut body);
+        let resp = self.execute(Method::POST, &url, Some(body)).await?;
+        let task = resp.json::<TodoTask>().await.map_err(|e| GraphError::Decode(e.to_string()))?;
+        self.finish_with_recurrence(list_id, task, relative).await
     }
 
     /// Updates a task's editable fields (PATCH).
@@ -95,8 +100,60 @@ impl GraphClient {
     ) -> Result<TodoTask, GraphError> {
         let url =
             format!("{}/me/todo/lists/{}/tasks/{}", self.base_url, seg(list_id), seg(task_id));
-        let resp = self.execute(Method::PATCH, &url, Some(input.to_body(true))).await?;
-        resp.json::<TodoTask>().await.map_err(|e| GraphError::Decode(e.to_string()))
+        let mut body = input.to_body(true);
+        let relative = take_relative(input, &mut body);
+        let resp = self.execute(Method::PATCH, &url, Some(body)).await?;
+        let task = resp.json::<TodoTask>().await.map_err(|e| GraphError::Decode(e.to_string()))?;
+        self.finish_with_recurrence(list_id, task, relative).await
+    }
+
+    /// GETs a single task by id.
+    pub async fn get_task(&self, list_id: &str, task_id: &str) -> Result<TodoTask, GraphError> {
+        let url =
+            format!("{}/me/todo/lists/{}/tasks/{}", self.base_url, seg(list_id), seg(task_id));
+        self.get_json(&url).await
+    }
+
+    /// After a create/update, applies a relative recurrence (if any) via the
+    /// Outlook endpoint - which the To Do endpoint can't store - then re-reads the
+    /// task so the caller sees the recurrence (and the due date Graph adjusted to
+    /// the next occurrence). Non-relative recurrences are already stored by the
+    /// To Do write, so the task is returned as-is.
+    async fn finish_with_recurrence(
+        &self,
+        list_id: &str,
+        task: TodoTask,
+        relative: Option<PatternedRecurrence>,
+    ) -> Result<TodoTask, GraphError> {
+        match relative {
+            Some(rec) => {
+                self.set_outlook_recurrence(&task.id, &rec).await?;
+                self.get_task(list_id, &task.id).await
+            }
+            None => Ok(task),
+        }
+    }
+
+    /// Applies a recurrence to a task via the Outlook task endpoint (beta), which,
+    /// unlike the To Do endpoint, preserves relative ("Nth weekday") patterns. The
+    /// task id is shared between the two endpoints; Graph adjusts the task's due
+    /// date to the next occurrence of the pattern.
+    async fn set_outlook_recurrence(
+        &self,
+        task_id: &str,
+        recurrence: &PatternedRecurrence,
+    ) -> Result<(), GraphError> {
+        let url = format!("{}/me/outlook/tasks/{}", self.beta_base(), seg(task_id));
+        let recurrence =
+            serde_json::to_value(recurrence).map_err(|e| GraphError::Decode(e.to_string()))?;
+        let body = serde_json::json!({ "recurrence": recurrence });
+        self.execute(Method::PATCH, &url, Some(body)).await?;
+        Ok(())
+    }
+
+    /// The beta API root, derived from `base_url` (`.../v1.0` -> `.../beta`).
+    fn beta_base(&self) -> String {
+        self.base_url.replace("/v1.0", "/beta")
     }
 
     /// Updates a task's status (e.g. `Completed`).
@@ -230,6 +287,17 @@ fn path_within(base_path: &str, next_path: &str) -> bool {
         Some(rest) => base_path.ends_with('/') || rest.starts_with('/'),
         None => false,
     }
+}
+
+/// If `input`'s recurrence is a relative ("Nth weekday") pattern, removes it from
+/// the To Do request `body` - so the write leaves any existing recurrence intact -
+/// and returns it to be applied via the Outlook endpoint instead.
+fn take_relative(input: &TaskInput, body: &mut serde_json::Value) -> Option<PatternedRecurrence> {
+    let rec = input.recurrence.as_ref().filter(|r| r.pattern.pattern_type.is_relative())?;
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("recurrence");
+    }
+    Some(rec.clone())
 }
 
 /// Percent-encodes an opaque Graph id for safe use as a single URL path segment.

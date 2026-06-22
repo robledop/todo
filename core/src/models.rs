@@ -99,6 +99,15 @@ pub enum RecurrencePatternType {
     Unknown,
 }
 
+impl RecurrencePatternType {
+    /// True for the relative ("Nth weekday") patterns. The v1.0 To Do task
+    /// endpoint silently downgrades these to `daily` on write, so they have to be
+    /// applied via the Outlook task endpoint instead.
+    pub fn is_relative(self) -> bool {
+        matches!(self, Self::RelativeMonthly | Self::RelativeYearly)
+    }
+}
+
 /// `recurrencePattern.index` for relative monthly/yearly patterns. Only used by
 /// the form (the wire model stores `index: Option<String>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

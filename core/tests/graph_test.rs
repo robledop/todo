@@ -3,8 +3,12 @@ mod common;
 use std::sync::Arc;
 use common::StaticTokenProvider;
 use outlook_tasks_core::graph::GraphClient;
+use outlook_tasks_core::models::{
+    PatternedRecurrence, RecurrencePattern, RecurrencePatternType, RecurrenceRange,
+    RecurrenceRangeType, TaskInput,
+};
 use serde_json::json;
-use wiremock::matchers::{header, method, path, query_param};
+use wiremock::matchers::{body_partial_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -404,4 +408,128 @@ async fn http_error_body_is_bounded() {
         }
         other => panic!("expected Http error, got {other:?}"),
     }
+}
+
+/// Matches a request whose JSON body does NOT contain the given top-level key.
+struct BodyLacks(&'static str);
+impl wiremock::Match for BodyLacks {
+    fn matches(&self, req: &wiremock::Request) -> bool {
+        serde_json::from_slice::<serde_json::Value>(&req.body)
+            .ok()
+            .and_then(|v| v.as_object().map(|o| !o.contains_key(self.0)))
+            .unwrap_or(true)
+    }
+}
+
+fn relative_monthly_input() -> TaskInput {
+    TaskInput {
+        title: "Test".into(),
+        recurrence: Some(PatternedRecurrence {
+            pattern: RecurrencePattern {
+                pattern_type: RecurrencePatternType::RelativeMonthly,
+                interval: 1,
+                month: None,
+                day_of_month: None,
+                days_of_week: vec!["monday".into()],
+                first_day_of_week: None,
+                index: Some("first".into()),
+            },
+            range: RecurrenceRange {
+                range_type: RecurrenceRangeType::NoEnd,
+                start_date: "2026-06-01".into(),
+                end_date: None,
+                number_of_occurrences: None,
+                recurrence_time_zone: Some("UTC".into()),
+            },
+        }),
+        ..Default::default()
+    }
+}
+
+/// What the re-fetch returns once the Outlook endpoint has stored the pattern.
+fn relative_task_body() -> serde_json::Value {
+    json!({
+        "id": "T1", "title": "Test", "status": "notStarted",
+        "recurrence": {
+            "pattern": {"type":"relativeMonthly","interval":1,"daysOfWeek":["monday"],"index":"first"},
+            "range": {"type":"noEnd","startDate":"2026-07-06"}
+        }
+    })
+}
+
+#[tokio::test]
+async fn create_task_routes_relative_recurrence_through_outlook() {
+    let server = MockServer::start().await;
+    // To Do create must NOT carry the relative recurrence (it would degrade to daily).
+    Mock::given(method("POST"))
+        .and(path("/me/todo/lists/L1/tasks"))
+        .and(BodyLacks("recurrence"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"T1","title":"Test","status":"notStarted"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // The relative pattern is applied via the Outlook (beta) endpoint, same id.
+    Mock::given(method("PATCH"))
+        .and(path("/me/outlook/tasks/T1"))
+        .and(body_partial_json(json!({"recurrence":{"pattern":{"type":"relativeMonthly","index":"first"}}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"T1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Then the task is re-read via To Do and now carries the relative recurrence.
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists/L1/tasks/T1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(relative_task_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        Arc::new(StaticTokenProvider("test-token".to_string())),
+    );
+    let task = client.create_task("L1", &relative_monthly_input()).await.unwrap();
+    assert_eq!(task.id, "T1");
+    assert_eq!(
+        task.recurrence.unwrap().pattern.pattern_type,
+        RecurrencePatternType::RelativeMonthly
+    );
+}
+
+#[tokio::test]
+async fn update_task_preserves_relative_recurrence_via_outlook() {
+    let server = MockServer::start().await;
+    // To Do update omits recurrence so it can't clobber/degrade the existing one.
+    Mock::given(method("PATCH"))
+        .and(path("/me/todo/lists/L1/tasks/T1"))
+        .and(BodyLacks("recurrence"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"T1","title":"Test","status":"notStarted"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/me/outlook/tasks/T1"))
+        .and(body_partial_json(json!({"recurrence":{"pattern":{"type":"relativeMonthly"}}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"T1"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/me/todo/lists/L1/tasks/T1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(relative_task_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        Arc::new(StaticTokenProvider("test-token".to_string())),
+    );
+    let task = client.update_task("L1", "T1", &relative_monthly_input()).await.unwrap();
+    assert_eq!(
+        task.recurrence.unwrap().pattern.pattern_type,
+        RecurrencePatternType::RelativeMonthly
+    );
 }
