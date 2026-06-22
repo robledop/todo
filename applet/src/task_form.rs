@@ -700,8 +700,11 @@ fn reminder_controls(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message
     use crate::app::Message;
     use cosmic::widget;
 
+    let spacing = cosmic::theme::active().cosmic().spacing;
+
     let toggle = widget::toggler(form.reminder_on)
         .label("Remind me".to_string())
+        .spacing(spacing.space_xs)
         .on_toggle(|b| Message::Form(FormMsg::ReminderOn(b)));
 
     let mut col = widget::Column::new().push(toggle).spacing(8);
