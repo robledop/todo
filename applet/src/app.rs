@@ -12,12 +12,12 @@ use outlook_tasks_core::auth::{
     AuthConfig, Authenticator, BootstrapOutcome, LoopbackServer, OAuthClient, Oo7TokenStore,
 };
 use outlook_tasks_core::graph::{GraphClient, TokenProvider};
-use outlook_tasks_core::models::{TaskStatus, TodoList, TodoTask};
+use outlook_tasks_core::models::{TaskStatus, TodoList, TodoTask, UserProfile};
 use outlook_tasks_core::GraphError;
 
 use crate::config::Config;
 use crate::consts::{ACCOUNT_ID, APP_ID, CLIENT_ID, GRAPH_BASE};
-use crate::state::{AppState, PopupView, Ready};
+use crate::state::{AccountInfo, AppState, PopupView, Ready};
 
 /// How often to check loaded tasks for reminders that just came due.
 const REMINDER_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -126,6 +126,22 @@ pub enum Message {
     ReminderTick,
     /// Result of firing one reminder notification (logged on failure).
     ReminderNotified(Result<(), String>),
+    /// Open the settings screen.
+    OpenSettings,
+    /// Return from settings to the task list.
+    CloseSettings,
+    /// Result of fetching the signed-in account's profile for the settings screen.
+    /// `Err` carries a message for logging only (never routed to re-auth).
+    MeLoaded(Result<UserProfile, String>),
+    /// Show the sign-out confirmation.
+    SignOutRequested,
+    /// Dismiss the sign-out confirmation.
+    SignOutCancelled,
+    /// Confirm sign-out: clear the stored session.
+    SignOutConfirmed,
+    /// Sign-out finished. `Ok` returns to the signed-out screen; `Err` is logged
+    /// and shown inline (the app stays signed in).
+    SignOutDone(Result<(), String>),
 }
 
 impl cosmic::Application for AppModel {
@@ -217,6 +233,9 @@ impl cosmic::Application for AppModel {
                 if self.popup == Some(id) {
                     self.popup = None;
                 }
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.cancel_sign_out();
+                }
             }
 
             // Startup check: apply only if still bootstrapping, so a slow result
@@ -252,6 +271,12 @@ impl cosmic::Application for AppModel {
             }
 
             Message::ListsLoaded(Ok(lists)) => {
+                // A late list-load must not resurrect a signed-in UI after sign-out:
+                // apply only while still signed in (apply_outcome sets Ready before
+                // load_lists, so the normal in-flight case is already Ready).
+                if !matches!(self.state, AppState::Ready(_)) {
+                    return Task::none();
+                }
                 let persisted = self.config.selected_list_id.clone();
                 match Ready::pick_initial_list(&lists, persisted.as_deref()) {
                     Some(id) => {
@@ -487,6 +512,67 @@ impl cosmic::Application for AppModel {
                 // Auth-expiry and throttling keep their existing handling.
                 return self.handle_fetch_error(e);
             }
+
+            Message::OpenSettings => {
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.view = PopupView::Settings;
+                    if ready.begin_account_load() {
+                        return self.load_me();
+                    }
+                }
+            }
+            Message::CloseSettings => {
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.cancel_sign_out();
+                    ready.view = PopupView::List;
+                }
+            }
+            Message::MeLoaded(Ok(profile)) => {
+                // Apply only while still awaiting a load, so a stale response can't
+                // overwrite a newer state (or a session the user has left).
+                if let AppState::Ready(ready) = &mut self.state
+                    && matches!(ready.account, AccountInfo::Loading)
+                {
+                    ready.set_account(profile);
+                }
+            }
+            Message::MeLoaded(Err(e)) => {
+                log::warn!("failed to load account profile: {e}");
+                if let AppState::Ready(ready) = &mut self.state
+                    && matches!(ready.account, AccountInfo::Loading)
+                {
+                    ready.account_unavailable();
+                }
+            }
+            Message::SignOutRequested => {
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.request_sign_out();
+                }
+            }
+            Message::SignOutCancelled => {
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.cancel_sign_out();
+                }
+            }
+            Message::SignOutConfirmed => {
+                if let AppState::Ready(ready) = &mut self.state {
+                    // Collapse the confirm row (also guards a double-submit from
+                    // spawning two sign-out tasks) and clear any prior failure.
+                    ready.cancel_sign_out();
+                    ready.sign_out_error = None;
+                }
+                return self.sign_out();
+            }
+            Message::SignOutDone(Ok(())) => self.state = AppState::SignedOut,
+            Message::SignOutDone(Err(e)) => {
+                log::warn!("sign-out did not fully clear the session: {e}");
+                if let AppState::Ready(ready) = &mut self.state {
+                    ready.sign_out_error = Some(
+                        "Could not fully sign out - the keyring may still hold your session. Try again."
+                            .to_string(),
+                    );
+                }
+            }
         }
         Task::none()
     }
@@ -552,6 +638,11 @@ impl cosmic::Application for AppModel {
             AppState::Ready(ready) => match &ready.view {
                 PopupView::List => self.ready_view(ready),
                 PopupView::Form(form) => crate::task_form::form_view(form),
+                PopupView::Settings => crate::settings::settings_view(
+                    &ready.account,
+                    ready.confirming_sign_out,
+                    ready.sign_out_error.as_deref(),
+                ),
             },
         };
         self.core.applet.popup_container(content).into()
@@ -594,6 +685,10 @@ impl AppModel {
             .push(
                 widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
                     .on_press(Message::Refresh),
+            )
+            .push(
+                widget::button::icon(widget::icon::from_name("emblem-system-symbolic"))
+                    .on_press(Message::OpenSettings),
             )
             .align_y(Alignment::Center)
             .spacing(8);
@@ -904,6 +999,31 @@ impl AppModel {
         Task::perform(async move { run_sign_in(auth).await }, |o| {
             cosmic::action::app(Message::SignedIn(o))
         })
+    }
+
+    /// Fetches the signed-in account's profile for the settings screen.
+    fn load_me(&self) -> Task<cosmic::Action<Message>> {
+        let Some(services) = &self.services else {
+            return Task::none();
+        };
+        let graph = services.graph.clone();
+        Task::perform(
+            async move { graph.get_me().await.map_err(|e| e.to_string()) },
+            |r| cosmic::action::app(Message::MeLoaded(r)),
+        )
+    }
+
+    /// Clears the stored session, then returns to the signed-out screen (or reports
+    /// an inline error if the keyring delete failed).
+    fn sign_out(&self) -> Task<cosmic::Action<Message>> {
+        let Some(services) = &self.services else {
+            return Task::none();
+        };
+        let auth = services.auth.clone();
+        Task::perform(
+            async move { auth.sign_out().await.map_err(|e| e.to_string()) },
+            |r| cosmic::action::app(Message::SignOutDone(r)),
+        )
     }
 
     fn load_lists(&self) -> Task<cosmic::Action<Message>> {

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use outlook_tasks_core::models::{TaskStatus, TodoList, TodoTask};
+use outlook_tasks_core::models::{TaskStatus, TodoList, TodoTask, UserProfile};
 
 use crate::task_form::TaskForm;
 
@@ -12,6 +12,24 @@ pub enum PopupView {
     List,
     // Boxed: TaskForm is large (calendar models), keeping PopupView/Ready small.
     Form(Box<TaskForm>),
+    /// The settings screen (account + sign out).
+    Settings,
+}
+
+/// Load state of the signed-in account's profile shown on the settings screen.
+/// Fetched lazily the first time settings is opened, then cached here.
+#[derive(Debug, Clone, Default)]
+pub enum AccountInfo {
+    /// Not fetched yet (initial), or eligible to retry on the next settings open.
+    #[default]
+    NotLoaded,
+    /// A `/me` request is in flight.
+    Loading,
+    /// Profile loaded.
+    Loaded(UserProfile),
+    /// The profile could not be loaded (e.g. a token without `User.Read`, or a
+    /// transient error); the screen falls back to a generic "Signed in" label.
+    Unavailable,
 }
 
 /// Top-level UI state.
@@ -68,6 +86,15 @@ pub struct Ready {
     /// task until the first resolves, so two racing PATCHes can't land out of
     /// order and leave the wrong status.
     pub toggling: HashSet<String>,
+    /// The signed-in account's profile, shown on the settings screen. Fetched
+    /// lazily the first time settings is opened.
+    pub account: AccountInfo,
+    /// True while the settings screen is showing the sign-out confirmation.
+    pub confirming_sign_out: bool,
+    /// Set when `sign_out()` failed (e.g. the keyring delete failed); shown on the
+    /// settings screen, and the app stays signed in rather than falsely reporting
+    /// a sign-out that didn't persist.
+    pub sign_out_error: Option<String>,
 }
 
 impl Ready {
@@ -196,6 +223,39 @@ impl Ready {
     /// Clears the pending delete confirmation.
     pub fn cancel_delete(&mut self) {
         self.confirming_delete = None;
+    }
+
+    /// Marks the account profile as loading and returns true if the caller should
+    /// fetch it now. Fetches on the first open (`NotLoaded`) and retries after a
+    /// previous failure (`Unavailable`); a load already in flight or done is a no-op.
+    pub fn begin_account_load(&mut self) -> bool {
+        if matches!(self.account, AccountInfo::NotLoaded | AccountInfo::Unavailable) {
+            self.account = AccountInfo::Loading;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Stores a loaded account profile.
+    pub fn set_account(&mut self, profile: UserProfile) {
+        self.account = AccountInfo::Loaded(profile);
+    }
+
+    /// Marks the account profile unavailable (load failed); the settings screen
+    /// falls back to a generic label and the next open retries.
+    pub fn account_unavailable(&mut self) {
+        self.account = AccountInfo::Unavailable;
+    }
+
+    /// Shows the sign-out confirmation.
+    pub fn request_sign_out(&mut self) {
+        self.confirming_sign_out = true;
+    }
+
+    /// Hides the sign-out confirmation.
+    pub fn cancel_sign_out(&mut self) {
+        self.confirming_sign_out = false;
     }
 
     /// Marks a task's status change as in flight. Returns false if one is
@@ -559,6 +619,53 @@ mod tests {
         // Past the full duration: pruned, and the change is reported.
         assert!(ready.prune_completing(start + COMPLETE_HOLD + COMPLETE_COLLAPSE));
         assert!(!ready.is_completing("a"));
+    }
+
+    #[test]
+    fn account_info_defaults_to_not_loaded() {
+        assert!(matches!(Ready::default().account, AccountInfo::NotLoaded));
+    }
+
+    #[test]
+    fn begin_account_load_fetches_then_is_idempotent() {
+        let mut ready = Ready::default();
+        assert!(ready.begin_account_load()); // NotLoaded -> Loading, fetch
+        assert!(matches!(ready.account, AccountInfo::Loading));
+        assert!(!ready.begin_account_load()); // already Loading -> no fetch
+    }
+
+    #[test]
+    fn set_account_then_no_reload() {
+        let mut ready = Ready::default();
+        ready.set_account(UserProfile {
+            display_name: Some("Jane".into()),
+            user_principal_name: Some("jane@outlook.com".into()),
+            mail: None,
+        });
+        assert!(matches!(ready.account, AccountInfo::Loaded(_)));
+        assert!(!ready.begin_account_load()); // loaded -> no refetch
+    }
+
+    #[test]
+    fn unavailable_retries_on_next_open() {
+        let mut ready = Ready::default();
+        ready.account_unavailable();
+        assert!(ready.begin_account_load()); // Unavailable -> Loading, retry
+    }
+
+    #[test]
+    fn sign_out_confirmation_toggles() {
+        let mut ready = Ready::default();
+        assert!(!ready.confirming_sign_out);
+        ready.request_sign_out();
+        assert!(ready.confirming_sign_out);
+        ready.cancel_sign_out();
+        assert!(!ready.confirming_sign_out);
+    }
+
+    #[test]
+    fn popup_view_defaults_to_list() {
+        assert_eq!(PopupView::default(), PopupView::List);
     }
 
     #[test]

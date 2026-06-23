@@ -3,6 +3,7 @@ mod config;
 mod consts;
 mod notify;
 mod reminders;
+mod settings;
 mod state;
 mod task_form;
 
