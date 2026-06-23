@@ -1,4 +1,4 @@
-use outlook_tasks_core::models::{GraphCollection, TaskStatus, TodoList, TodoTask};
+use outlook_tasks_core::models::{GraphCollection, TaskStatus, TodoList, TodoTask, UserProfile};
 
 #[test]
 fn deserializes_todo_list_collection() {
@@ -211,4 +211,29 @@ fn task_input_body_includes_recurrence() {
     // are omitted from the request; the service derives the start from dueDateTime.
     assert!(v["recurrence"]["range"].get("startDate").is_none(), "startDate must be omitted");
     assert!(v["recurrence"]["range"].get("endDate").is_none(), "endDate must be omitted");
+}
+
+#[test]
+fn user_profile_deserializes_full_me() {
+    let json = r#"{"displayName":"Jane Doe","userPrincipalName":"jane@outlook.com","mail":"jane@outlook.com"}"#;
+    let p: UserProfile = serde_json::from_str(json).unwrap();
+    assert_eq!(p.name(), Some("Jane Doe"));
+    assert_eq!(p.email(), Some("jane@outlook.com"));
+}
+
+#[test]
+fn user_profile_email_falls_back_to_upn_when_mail_absent() {
+    let json = r#"{"displayName":"Jane","userPrincipalName":"jane@outlook.com","mail":null}"#;
+    let p: UserProfile = serde_json::from_str(json).unwrap();
+    assert_eq!(p.email(), Some("jane@outlook.com"));
+}
+
+#[test]
+fn user_profile_display_combines_name_and_email() {
+    let p = UserProfile {
+        display_name: Some("Jane Doe".into()),
+        user_principal_name: Some("jane@outlook.com".into()),
+        mail: None,
+    };
+    assert_eq!(p.to_string(), "Jane Doe <jane@outlook.com>");
 }

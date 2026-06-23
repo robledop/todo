@@ -244,3 +244,40 @@ fn recurrence_request_body(r: &PatternedRecurrence) -> serde_json::Value {
 pub struct UpdateTaskStatus {
     pub status: TaskStatus,
 }
+
+/// Microsoft Graph `user` resource (the `/me` endpoint), reduced to the fields the
+/// settings screen displays. All optional: a personal account may omit `mail`, in
+/// which case `userPrincipalName` carries the address.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UserProfile {
+    #[serde(rename = "displayName", default)]
+    pub display_name: Option<String>,
+    #[serde(rename = "userPrincipalName", default)]
+    pub user_principal_name: Option<String>,
+    #[serde(default)]
+    pub mail: Option<String>,
+}
+
+impl UserProfile {
+    /// The account's display name, if Graph returned one.
+    pub fn name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+
+    /// The account's email: `mail` when present, else `userPrincipalName` (which
+    /// holds the address for personal Microsoft accounts).
+    pub fn email(&self) -> Option<&str> {
+        self.mail.as_deref().or(self.user_principal_name.as_deref())
+    }
+}
+
+impl std::fmt::Display for UserProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.name(), self.email()) {
+            (Some(n), Some(e)) => write!(f, "{n} <{e}>"),
+            (Some(n), None) => f.write_str(n),
+            (None, Some(e)) => f.write_str(e),
+            (None, None) => f.write_str("Signed in"),
+        }
+    }
+}
