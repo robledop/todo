@@ -678,18 +678,24 @@ impl AppModel {
         let header = widget::Row::new()
             .push(dropdown)
             .push(widget::space::horizontal())
-            .push(
+            .push(widget::tooltip(
                 widget::button::icon(widget::icon::from_name("list-add-symbolic"))
                     .on_press(Message::OpenCreate),
-            )
-            .push(
+                widget::text::body("New task"),
+                widget::tooltip::Position::Bottom,
+            ))
+            .push(widget::tooltip(
                 widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
                     .on_press(Message::Refresh),
-            )
-            .push(
+                widget::text::body("Refresh"),
+                widget::tooltip::Position::Bottom,
+            ))
+            .push(widget::tooltip(
                 widget::button::icon(widget::icon::from_name("emblem-system-symbolic"))
                     .on_press(Message::OpenSettings),
-            )
+                widget::text::body("Settings"),
+                widget::tooltip::Position::Bottom,
+            ))
             .align_y(Alignment::Center)
             .spacing(8);
 
