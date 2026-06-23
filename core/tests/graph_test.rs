@@ -628,3 +628,29 @@ async fn update_task_skips_outlook_when_recurrence_unchanged() {
         RecurrencePatternType::RelativeMonthly
     );
 }
+
+#[tokio::test]
+async fn get_me_sends_bearer_and_parses() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/me"))
+        .and(header("Authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "displayName": "Jane Doe",
+            "userPrincipalName": "jane@outlook.com",
+            "mail": "jane@outlook.com"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        Arc::new(StaticTokenProvider("test-token".to_string())),
+    );
+
+    let me = client.get_me().await.unwrap();
+    assert_eq!(me.name(), Some("Jane Doe"));
+    assert_eq!(me.email(), Some("jane@outlook.com"));
+}

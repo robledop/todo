@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use crate::error::{AuthError, GraphError};
 use crate::models::{
     GraphCollection, PatternedRecurrence, RecurrencePatternType, TaskInput, TaskStatus, TodoList,
-    TodoTask, UpdateTaskStatus,
+    TodoTask, UpdateTaskStatus, UserProfile,
 };
 
 /// Supplies bearer access tokens to the Graph client and refreshes them on demand.
@@ -113,6 +113,14 @@ impl GraphClient {
         let url =
             format!("{}/me/todo/lists/{}/tasks/{}", self.base_url, seg(list_id), seg(task_id));
         self.get_json(&url).await
+    }
+
+    /// GETs the signed-in user's profile (`/me`). Requires the `User.Read` scope;
+    /// a token granted without it gets 403 `GraphError::Forbidden` (not retried),
+    /// which the caller renders as an "account unavailable" hint rather than
+    /// re-authenticating.
+    pub async fn get_me(&self) -> Result<UserProfile, GraphError> {
+        self.get_json(&format!("{}/me", self.base_url)).await
     }
 
     /// After a create/update, applies a relative recurrence (if any) via the
