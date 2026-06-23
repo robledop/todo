@@ -126,3 +126,11 @@ fn redirect_params_debug_redacts_code_and_state() {
     assert!(!dbg.contains("the-auth-code"), "code leaked: {dbg}");
     assert!(!dbg.contains("the-csrf-state"), "state leaked: {dbg}");
 }
+
+#[test]
+fn consumers_requests_user_read_scope() {
+    let cfg = AuthConfig::consumers("cid", "http://localhost/");
+    assert!(cfg.scopes.iter().any(|s| s == "User.Read"), "User.Read must be requested");
+    assert!(cfg.scopes.iter().any(|s| s == "Tasks.ReadWrite"));
+    assert!(cfg.scopes.iter().any(|s| s == "offline_access"));
+}
