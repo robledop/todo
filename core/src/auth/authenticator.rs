@@ -69,6 +69,20 @@ impl Authenticator {
         Ok(())
     }
 
+    /// Ends the session: clears the stored refresh token, then drops the cached
+    /// access token. Runs under `refresh_lock` so a concurrent refresh can't save a
+    /// rotated refresh token after the clear (which would resurrect the session on
+    /// the next launch). The store is cleared first and the cache only on success,
+    /// so a keyring-delete failure returns `Err` with the cache left intact - the
+    /// caller keeps the user signed in and surfaces the error rather than falsely
+    /// reporting a sign-out that didn't persist.
+    pub async fn sign_out(&self) -> Result<(), AuthError> {
+        let _guard = self.refresh_lock.lock().await;
+        self.store.clear().await.map_err(|e| AuthError::Store(e.to_string()))?;
+        *self.cache.lock().await = None;
+        Ok(())
+    }
+
     /// Startup check: classifies into Ready / SignedOut / NoKeyring.
     pub async fn bootstrap(&self) -> BootstrapOutcome {
         match self.store.load().await {
