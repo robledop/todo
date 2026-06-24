@@ -14,7 +14,7 @@ build-release:
     cargo build --release -p {{name}}
 
 run:
-    cosmic applet run -p {{name}}
+    cargo run
 
 check:
     cargo clippy --workspace --all-targets -- -W clippy::pedantic
