@@ -212,7 +212,7 @@ fn input(
     recurrence: Option<PatternedRecurrence>,
     reminder: Option<DateTimeTimeZone>,
 ) -> TaskInput {
-    TaskInput { title: "Test".to_string(), importance, due, recurrence, reminder }
+    TaskInput { title: "Test".to_string(), importance, due, recurrence, reminder, body: None }
 }
 
 fn due_dtz(date: &str) -> DateTimeTimeZone {

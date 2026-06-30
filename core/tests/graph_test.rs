@@ -167,6 +167,8 @@ async fn update_task_patches_input_body() {
             "title": "Renamed", "importance": "high",
             "dueDateTime": null, "recurrence": null,
             "isReminderOn": false, "reminderDateTime": null
+            // No `body`: this edit never loaded a note, so the PATCH omits it
+            // rather than risk clearing a server-side note (body is Option::None).
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "T9", "title": "Renamed", "status": "notStarted", "importance": "high"
@@ -186,6 +188,32 @@ async fn update_task_patches_input_body() {
     };
     let task = client.update_task("L1", "T9", &input).await.unwrap();
     assert_eq!(task.title, "Renamed");
+}
+
+#[tokio::test]
+async fn create_task_with_note_sends_html_body() {
+    use outlook_tasks_core::models::TaskInput;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/me/todo/lists/L1/tasks"))
+        // The To Do API only accepts html for `body`, so the form's escaped text
+        // arrives here as html content.
+        .and(body_partial_json(
+            json!({ "body": { "content": "buy &lt;5", "contentType": "html" } }),
+        ))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "T9", "title": "x", "status": "notStarted"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = GraphClient::new(
+        server.uri(),
+        reqwest::Client::new(),
+        std::sync::Arc::new(common::StaticTokenProvider("test-token".to_string())),
+    );
+    let input = TaskInput { title: "x".into(), body: Some("buy &lt;5".into()), ..Default::default() };
+    client.create_task("L1", &input).await.unwrap();
 }
 
 #[tokio::test]

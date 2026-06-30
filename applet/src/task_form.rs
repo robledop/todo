@@ -1,7 +1,7 @@
 use chrono::Datelike;
 use outlook_tasks_core::models::{
-    DateTimeTimeZone, Importance, PatternedRecurrence, RecurrencePattern, RecurrencePatternType,
-    RecurrenceRange, RecurrenceRangeType, TaskInput, TodoTask, WeekIndex,
+    BodyType, DateTimeTimeZone, Importance, ItemBody, PatternedRecurrence, RecurrencePattern,
+    RecurrencePatternType, RecurrenceRange, RecurrenceRangeType, TaskInput, TodoTask, WeekIndex,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +46,20 @@ pub struct TaskForm {
     pub reminder_on: bool,
     pub reminder_date: Option<String>, // YYYY-MM-DD
     pub reminder_time: String,         // HH:MM
+    /// The note as editable plain text. HTML notes are flattened for display; the
+    /// canonical value lives here while the multiline editor buffer (which is not
+    /// `Clone`/`Eq`) lives on `AppModel`.
+    pub note: String,
+    /// The original HTML `content` when the loaded note was `html`, kept verbatim
+    /// so an edit that does not touch the note re-sends it unchanged instead of
+    /// re-escaping a flattened copy. Mirrors `preserved_recurrence`; cleared by
+    /// `set_note` once the visible text diverges from the rendered original.
+    pub preserved_note_html: Option<String>,
+    /// The note's rendered text as loaded, used to tell "the note was emptied"
+    /// (so clear it) from "there was never a note to begin with, or it was not
+    /// loaded" (so leave the server note untouched). Guards against an edit of a
+    /// task whose `body` was absent silently wiping a server-side note.
+    pub original_note: String,
     pub error: Option<String>,
     /// A save request is in flight; suppresses re-submits so a double-click
     /// can't create the task twice.
@@ -82,6 +96,9 @@ impl Default for TaskForm {
             reminder_on: false,
             reminder_date: None,
             reminder_time: "09:00".into(),
+            note: String::new(),
+            preserved_note_html: None,
+            original_note: String::new(),
             error: None,
             saving: false,
             preserved_recurrence: None,
@@ -96,6 +113,19 @@ impl Default for TaskForm {
 impl TaskForm {
     pub fn create() -> Self {
         Self::default()
+    }
+
+    /// Sets the note's plain text (driven by the multiline editor on `AppModel`).
+    /// Once the visible text diverges from the rendered original, any preserved
+    /// HTML is dropped so the edit is saved as fresh escaped HTML, not the stale
+    /// original. Mirrors how touching the repeat control drops `preserved_recurrence`.
+    pub fn set_note(&mut self, text: String) {
+        if let Some(html) = &self.preserved_note_html
+            && text != crate::note::html_to_text(html)
+        {
+            self.preserved_note_html = None;
+        }
+        self.note = text;
     }
 
     /// Builds a `TaskInput` from the form for the given timezone name (e.g. the
@@ -125,7 +155,27 @@ impl TaskForm {
         // clear it; cleared once the user touches the repeat control.
         let recurrence = self.build_recurrence().or_else(|| self.preserved_recurrence.clone());
 
-        Ok(TaskInput { title: title.to_string(), importance: self.importance, due, recurrence, reminder })
+        // The note is written as html (the only type the API accepts on write).
+        // A non-empty note re-sends preserved HTML verbatim when untouched, else
+        // escapes the plain text. An emptied note clears (`Some("")`) only if a
+        // note was actually loaded; a task that never had a loaded note is left
+        // untouched (`None`), so an unrelated edit can't wipe a server-side note.
+        let body = if !self.note.trim().is_empty() {
+            Some(self.preserved_note_html.clone().unwrap_or_else(|| crate::note::text_to_html(&self.note)))
+        } else if !self.original_note.trim().is_empty() {
+            Some(String::new())
+        } else {
+            None
+        };
+
+        Ok(TaskInput {
+            title: title.to_string(),
+            importance: self.importance,
+            due,
+            recurrence,
+            reminder,
+            body,
+        })
     }
 
     fn build_recurrence(&self) -> Option<PatternedRecurrence> {
@@ -222,6 +272,8 @@ impl TaskForm {
 
         let due_cal = cal_from(due.as_deref());
         let reminder_cal = cal_from(reminder_date.as_deref());
+        let (note, preserved_note_html) = note_from_body(task.body.as_ref());
+        let original_note = note.clone();
 
         let mut form = Self {
             mode: FormMode::Edit { task_id: task.id.clone() },
@@ -231,6 +283,9 @@ impl TaskForm {
             reminder_on: task.is_reminder_on,
             reminder_date,
             reminder_time,
+            note,
+            preserved_note_html,
+            original_note,
             due_cal,
             reminder_cal,
             ..Self::default()
@@ -421,7 +476,10 @@ const INDEX_LABELS: [&str; 5] = ["First", "Second", "Third", "Fourth", "Last"];
 /// Renders the create/edit form. All field edits route through
 /// `Message::Form(FormMsg::...)`; Cancel returns to the list and Save commits.
 /// Save is disabled while the form is invalid (the validity hint says why).
-pub fn form_view(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
+pub fn form_view<'a>(
+    form: &'a TaskForm,
+    note_editor: &'a cosmic::widget::text_editor::Content,
+) -> cosmic::Element<'a, crate::app::Message> {
     use crate::app::Message;
     use cosmic::widget;
 
@@ -459,7 +517,15 @@ pub fn form_view(form: &TaskForm) -> cosmic::Element<'_, crate::app::Message> {
     col = col
         .push(field_label("Importance"))
         .push(importance_dropdown(form))
-        .push(reminder_controls(form));
+        .push(reminder_controls(form))
+        .push(field_label("Note"))
+        .push(
+            widget::TextEditor::new(note_editor)
+                .placeholder("Add a note")
+                .height(cosmic::iced::Length::Fixed(96.0))
+                .padding(8)
+                .on_action(Message::NoteEdit),
+        );
 
     // Validity hint (timezone-independent): show the first blocking error, if any.
     if let Some(err) = form.to_input("UTC").err() {
@@ -787,6 +853,17 @@ fn time_part(dt: &str) -> String {
     dt.get(11..16).unwrap_or("09:00").to_string()
 }
 
+/// The editable plain-text note and any HTML to preserve, derived from a task's
+/// `body`. HTML is flattened for display; its original markup is preserved only
+/// when it renders to non-empty text, so an empty/whitespace body is just no note.
+fn note_from_body(body: Option<&ItemBody>) -> (String, Option<String>) {
+    let Some(body) = body else { return (String::new(), None) };
+    let display = crate::note::note_display_text(body);
+    let preserved = (body.content_type == BodyType::Html && !display.trim().is_empty())
+        .then(|| body.content.clone());
+    (display, preserved)
+}
+
 /// The local calendar day (`YYYY-MM-DD`) of a stored `dateTimeTimeZone`, converted
 /// from the zone Graph stored it in into `tz`. Falls back to the raw date if the
 /// stored value or zone can't be parsed.
@@ -1090,6 +1167,107 @@ mod tests {
         });
         let f = TaskForm::from_task(&task, "Asia/Tokyo");
         assert_eq!(f.due.as_deref(), Some("2026-06-20"));
+    }
+
+    fn note_task(content: &str, content_type: BodyType) -> TodoTask {
+        TodoTask {
+            id: "T1".into(),
+            title: "Pay rent".into(),
+            body: Some(ItemBody { content: content.into(), content_type }),
+            ..TodoTask::default()
+        }
+    }
+
+    #[test]
+    fn from_task_loads_text_note_verbatim() {
+        let f = TaskForm::from_task(&note_task("buy milk", BodyType::Text), "UTC");
+        assert_eq!(f.note, "buy milk");
+        assert_eq!(f.preserved_note_html, None);
+    }
+
+    #[test]
+    fn from_task_renders_and_preserves_html_note() {
+        let f = TaskForm::from_task(&note_task("<p>hello</p>", BodyType::Html), "UTC");
+        assert_eq!(f.note, "hello");
+        assert_eq!(f.preserved_note_html.as_deref(), Some("<p>hello</p>"));
+    }
+
+    #[test]
+    fn from_task_empty_body_object_is_no_note() {
+        let f = TaskForm::from_task(&note_task("", BodyType::Text), "UTC");
+        assert_eq!(f.note, "");
+        assert_eq!(f.preserved_note_html, None);
+        assert!(f.to_input("UTC").unwrap().body.is_none());
+    }
+
+    #[test]
+    fn to_input_escapes_a_text_note_to_html() {
+        let mut f = base();
+        f.set_note("a < b\nc".into());
+        assert_eq!(f.to_input("UTC").unwrap().body.as_deref(), Some("a &lt; b<br>c"));
+    }
+
+    #[test]
+    fn unedited_html_note_is_preserved_verbatim() {
+        let f = TaskForm::from_task(&note_task("<p>hi <b>there</b></p>", BodyType::Html), "UTC");
+        assert_eq!(f.to_input("UTC").unwrap().body.as_deref(), Some("<p>hi <b>there</b></p>"));
+    }
+
+    #[test]
+    fn editing_html_note_re_escapes_as_fresh_html() {
+        let mut f = TaskForm::from_task(&note_task("<p>hello</p>", BodyType::Html), "UTC");
+        f.set_note("hello world".into());
+        assert_eq!(f.preserved_note_html, None);
+        assert_eq!(f.to_input("UTC").unwrap().body.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn emptying_a_loaded_note_clears_it_with_empty_html() {
+        // A note that existed and was emptied is cleared with an empty html body.
+        let mut f = TaskForm::from_task(&note_task("buy milk", BodyType::Text), "UTC");
+        f.set_note(String::new());
+        assert_eq!(f.to_input("UTC").unwrap().body.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn html_that_renders_empty_is_left_untouched() {
+        // <br> flattens to "" so the editor shows nothing and there is no visible
+        // note to begin with; saving leaves the body alone (omit) rather than
+        // re-sending the original or writing an empty clear.
+        let f = TaskForm::from_task(&note_task("<br>", BodyType::Html), "UTC");
+        assert_eq!(f.note, "");
+        assert!(f.to_input("UTC").unwrap().body.is_none());
+    }
+
+    #[test]
+    fn text_note_with_entity_literals_preserves_displayed_text() {
+        // A text body shows its content literally; written as html it is escaped,
+        // and reading that html back recovers the same displayed text.
+        let f = TaskForm::from_task(&note_task("100 &amp; 200", BodyType::Text), "UTC");
+        assert_eq!(f.note, "100 &amp; 200");
+        let html = f.to_input("UTC").unwrap().body.unwrap();
+        assert_eq!(crate::note::html_to_text(&html), "100 &amp; 200");
+    }
+
+    #[test]
+    fn unknown_content_type_preserves_displayed_text() {
+        // An unexpected contentType is shown verbatim; an untouched save round-trips
+        // the displayed text through html escaping rather than corrupting it.
+        let f = TaskForm::from_task(&note_task("<b>x</b>", BodyType::Unknown), "UTC");
+        assert_eq!(f.note, "<b>x</b>");
+        let html = f.to_input("UTC").unwrap().body.unwrap();
+        assert_eq!(crate::note::html_to_text(&html), "<b>x</b>");
+    }
+
+    #[test]
+    fn note_never_loaded_is_left_untouched_on_edit() {
+        // A task whose `body` was absent (not loaded) must not have its server-side
+        // note wiped by a title-only edit: `to_input` omits `body` entirely.
+        let mut task = note_task("", BodyType::Text);
+        task.body = None;
+        let f = TaskForm::from_task(&task, "UTC");
+        assert_eq!(f.note, "");
+        assert!(f.to_input("UTC").unwrap().body.is_none());
     }
 
     #[test]

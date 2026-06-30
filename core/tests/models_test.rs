@@ -214,6 +214,74 @@ fn task_input_body_includes_recurrence() {
 }
 
 #[test]
+fn task_input_create_includes_html_body_when_set() {
+    let input =
+        TaskInput { title: "x".into(), body: Some("buy <b>milk</b>".into()), ..Default::default() };
+    let v = input.to_body(false);
+    assert_eq!(v["body"]["content"], "buy <b>milk</b>");
+    assert_eq!(v["body"]["contentType"], "html");
+}
+
+#[test]
+fn task_input_create_omits_body_when_none() {
+    let input = TaskInput { title: "x".into(), body: None, ..Default::default() };
+    let v = input.to_body(false);
+    assert!(v.get("body").is_none(), "create must omit body when there is no note");
+}
+
+#[test]
+fn task_input_update_clears_note_with_empty_html_not_null() {
+    use serde_json::Value;
+    // An explicit clear is `Some("")`: an empty HTML body, never null.
+    let input = TaskInput { title: "x".into(), body: Some(String::new()), ..Default::default() };
+    let v = input.to_body(true);
+    assert_ne!(v.get("body"), Some(&Value::Null), "body must not be sent as null");
+    assert_eq!(v["body"]["content"], "");
+    assert_eq!(v["body"]["contentType"], "html");
+}
+
+#[test]
+fn task_input_update_omits_body_when_none_leaves_note_untouched() {
+    let input = TaskInput { title: "x".into(), body: None, ..Default::default() };
+    let v = input.to_body(true);
+    // `None` means "don't touch the note", so an unrelated edit can't wipe it.
+    assert!(v.get("body").is_none(), "update must omit body when None");
+}
+
+#[test]
+fn task_input_update_includes_html_body_when_set() {
+    let input = TaskInput { title: "x".into(), body: Some("note<br>line2".into()), ..Default::default() };
+    let v = input.to_body(true);
+    assert_eq!(v["body"]["content"], "note<br>line2");
+    assert_eq!(v["body"]["contentType"], "html");
+}
+
+#[test]
+fn todo_task_deserializes_text_and_html_and_unknown_body() {
+    use outlook_tasks_core::models::BodyType;
+    let text: TodoTask =
+        serde_json::from_str(r#"{"id":"1","title":"t","status":"notStarted","body":{"content":"hi","contentType":"text"}}"#)
+            .unwrap();
+    assert_eq!(text.body.as_ref().unwrap().content, "hi");
+    assert_eq!(text.body.as_ref().unwrap().content_type, BodyType::Text);
+
+    let html: TodoTask = serde_json::from_str(
+        r#"{"id":"1","title":"t","status":"notStarted","body":{"content":"<p>hi</p>","contentType":"html"}}"#,
+    )
+    .unwrap();
+    assert_eq!(html.body.as_ref().unwrap().content_type, BodyType::Html);
+
+    let unknown: TodoTask = serde_json::from_str(
+        r#"{"id":"1","title":"t","status":"notStarted","body":{"content":"x","contentType":"weird"}}"#,
+    )
+    .unwrap();
+    assert_eq!(unknown.body.as_ref().unwrap().content_type, BodyType::Unknown);
+
+    let none: TodoTask = serde_json::from_str(r#"{"id":"1","title":"t","status":"notStarted"}"#).unwrap();
+    assert!(none.body.is_none());
+}
+
+#[test]
 fn user_profile_deserializes_full_me() {
     let json = r#"{"displayName":"Jane Doe","userPrincipalName":"jane@outlook.com","mail":"jane@outlook.com"}"#;
     let p: UserProfile = serde_json::from_str(json).unwrap();

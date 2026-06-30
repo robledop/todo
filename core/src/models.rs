@@ -33,6 +33,10 @@ pub struct TodoTask {
     pub is_reminder_on: bool,
     #[serde(rename = "reminderDateTime", default, skip_serializing_if = "Option::is_none")]
     pub reminder_date_time: Option<DateTimeTimeZone>,
+    /// The task's note. Graph returns `text` for app-authored notes and may return
+    /// `html` for notes touched in Outlook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<ItemBody>,
 }
 
 fn is_normal(i: &Importance) -> bool {
@@ -55,6 +59,28 @@ pub struct DateTimeTimeZone {
     pub date_time: String,
     #[serde(rename = "timeZone", default, skip_serializing_if = "Option::is_none")]
     pub time_zone: Option<String>,
+}
+
+/// `bodyType` enumeration for `itemBody.contentType`. `Unknown` keeps an
+/// unexpected Graph value from failing the whole task decode. Only used on the
+/// read side; writes always emit `html` (see `TaskInput::to_body`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum BodyType {
+    #[default]
+    Text,
+    Html,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Microsoft Graph `itemBody`: a task's note. `content` is plain text when
+/// `content_type` is `Text`, or HTML markup when `Html`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ItemBody {
+    pub content: String,
+    #[serde(rename = "contentType", default)]
+    pub content_type: BodyType,
 }
 
 /// `taskStatus` enumeration. `Unknown` guards against unknown future values.
@@ -186,6 +212,10 @@ pub struct TaskInput {
     pub due: Option<DateTimeTimeZone>,
     pub recurrence: Option<PatternedRecurrence>,
     pub reminder: Option<DateTimeTimeZone>,
+    /// The note's HTML content, or `None` for no note. The To Do API only accepts
+    /// `html` for `body` on write, so the form HTML-escapes plain text before it
+    /// reaches here; `to_body` always emits `contentType: "html"`.
+    pub body: Option<String>,
 }
 
 impl TaskInput {
@@ -221,8 +251,23 @@ impl TaskInput {
                 }
             }
         }
+
+        // The To Do API documents `body` as write-only-HTML with no nullable form,
+        // so a note is never sent as `null`. `Some` writes an html `itemBody` (an
+        // empty string clears the note with an empty html body); `None` omits
+        // `body` entirely, leaving any server-side note untouched. The form only
+        // emits `Some("")` when a note that was actually loaded got emptied, so an
+        // unrelated edit of a task whose note was never loaded can't wipe it.
+        if let Some(html) = &self.body {
+            o.insert("body".into(), itembody_html(html));
+        }
         Value::Object(o)
     }
+}
+
+/// A Graph `itemBody` request value with `contentType: "html"`.
+fn itembody_html(content: &str) -> serde_json::Value {
+    serde_json::json!({ "content": content, "contentType": "html" })
 }
 
 /// Serializes a recurrence for a To Do **request**, dropping the range's

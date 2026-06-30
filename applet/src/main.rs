@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod consts;
+mod note;
 mod notify;
 mod reminders;
 mod settings;

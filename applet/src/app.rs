@@ -7,6 +7,7 @@ use cosmic::iced::window::Id;
 use cosmic::iced::{time, Alignment, Length, Limits, Subscription};
 use cosmic::prelude::*;
 use cosmic::widget;
+use cosmic::widget::text_editor;
 
 use outlook_tasks_core::auth::{
     AuthConfig, Authenticator, BootstrapOutcome, LoopbackServer, OAuthClient, Oo7TokenStore,
@@ -47,6 +48,11 @@ pub struct AppModel {
     /// A throttle (429) retry is already scheduled; suppresses stacking another
     /// timer when more requests come back throttled before it fires.
     retry_scheduled: bool,
+    /// Multiline edit buffer for the task form's note. Lives here (not in the
+    /// `Clone`/`Eq` form/state types) because `text_editor::Content` is neither;
+    /// re-seeded from the form's `note` on every form open and synced back via
+    /// `Message::NoteEdit`.
+    note_editor: cosmic::widget::text_editor::Content,
 }
 
 /// Classified outcome of a Graph call, so the UI can react to auth-expiry and
@@ -115,6 +121,9 @@ pub enum Message {
     OpenEdit(String),
     CancelForm,
     Form(crate::task_form::FormMsg),
+    /// An edit in the form's multiline note editor. Handled at the app level since
+    /// it mutates `AppModel.note_editor`, which the pure form can't reach.
+    NoteEdit(cosmic::widget::text_editor::Action),
     SaveForm,
     /// Carries the list the save was issued against (see `TaskDeleted`).
     FormSaved(String, Result<Box<TodoTask>, FetchError>),
@@ -185,6 +194,7 @@ impl cosmic::Application for AppModel {
             services,
             reminder_last_check: Some(jiff::Timestamp::now()),
             retry_scheduled: false,
+            note_editor: cosmic::widget::text_editor::Content::new(),
         };
         (model, startup)
     }
@@ -454,7 +464,9 @@ impl cosmic::Application for AppModel {
 
             Message::OpenCreate => {
                 if let AppState::Ready(ready) = &mut self.state {
-                    ready.view = PopupView::Form(Box::new(crate::task_form::TaskForm::create()));
+                    let form = crate::task_form::TaskForm::create();
+                    self.note_editor = text_editor::Content::with_text(&form.note);
+                    ready.view = PopupView::Form(Box::new(form));
                 }
             }
             Message::OpenEdit(id) => {
@@ -463,8 +475,9 @@ impl cosmic::Application for AppModel {
                     && let AppState::Ready(ready) = &mut self.state
                     && let Some(task) = ready.tasks.iter().find(|t| t.id == id)
                 {
-                    ready.view =
-                        PopupView::Form(Box::new(crate::task_form::TaskForm::from_task(task, &system_tz())));
+                    let form = crate::task_form::TaskForm::from_task(task, &system_tz());
+                    self.note_editor = text_editor::Content::with_text(&form.note);
+                    ready.view = PopupView::Form(Box::new(form));
                 }
             }
             Message::CancelForm => {
@@ -477,6 +490,15 @@ impl cosmic::Application for AppModel {
                     && let PopupView::Form(form) = &mut ready.view
                 {
                     form.as_mut().apply(fmsg);
+                }
+            }
+            Message::NoteEdit(action) => {
+                // Only meaningful while the form is open; ignore stray actions.
+                if let AppState::Ready(ready) = &mut self.state
+                    && let PopupView::Form(form) = &mut ready.view
+                {
+                    self.note_editor.perform(action);
+                    form.set_note(self.note_editor.text());
                 }
             }
             Message::SaveForm => return self.save_form(),
@@ -638,7 +660,7 @@ impl cosmic::Application for AppModel {
                 .into(),
             AppState::Ready(ready) => match &ready.view {
                 PopupView::List => self.ready_view(ready),
-                PopupView::Form(form) => crate::task_form::form_view(form),
+                PopupView::Form(form) => crate::task_form::form_view(form, &self.note_editor),
                 PopupView::Settings => crate::settings::settings_view(
                     &ready.account,
                     ready.confirming_sign_out,
@@ -742,6 +764,14 @@ impl AppModel {
                 row = row.push(widget::text::body("!").class(cosmic::theme::Text::Color(
                     cosmic::iced::Color::from_rgb(0.8, 0.2, 0.2),
                 )));
+            }
+            // Note marker: a small document glyph for tasks that carry a note.
+            if crate::note::has_note(task) {
+                row = row.push(widget::tooltip(
+                    widget::icon::from_name("emblem-documents-symbolic").size(14).icon(),
+                    widget::text::body("Has a note"),
+                    widget::tooltip::Position::Top,
+                ));
             }
             // Single-line title that ellipsizes when too long, taking the leftover
             // width so the due date and trash stay pinned and fully visible. A real
@@ -1167,12 +1197,17 @@ impl AppModel {
         let Some(services) = &self.services else { return Task::none() };
         let graph = services.graph.clone();
         let tz = system_tz();
+        // The editor is the source of truth for the note; flush its current text
+        // into the form before reading it, so a not-yet-synced last keystroke
+        // (IME/focus race) can't be dropped at save.
+        let note_text = self.note_editor.text();
         let AppState::Ready(ready) = &mut self.state else { return Task::none() };
         let crate::state::PopupView::Form(form) = &mut ready.view else { return Task::none() };
         // Suppress a re-submit while a save is already running (double-click guard).
         if form.saving {
             return Task::none();
         }
+        form.set_note(note_text);
         let input = match form.to_input(&tz) {
             Ok(i) => i,
             Err(msg) => {
