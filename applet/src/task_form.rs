@@ -208,13 +208,16 @@ impl TaskForm {
 
     /// Pre-fills a form from an existing task (Edit mode). Unsupported recurrence
     /// shapes fall back to RepeatKind::None.
-    pub fn from_task(task: &TodoTask) -> Self {
-        let due = task.due_date_time.as_ref().map(|d| date_part(&d.date_time));
-        let reminder_date = task.reminder_date_time.as_ref().map(|d| date_part(&d.date_time));
+    pub fn from_task(task: &TodoTask, tz: &str) -> Self {
+        // Graph echoes due/reminder times back in UTC; re-express them in the
+        // local zone so the form shows the wall time the user set, not the UTC
+        // time on the wire.
+        let due = task.due_date_time.as_ref().map(|d| local_date(d, tz));
+        let reminder_date = task.reminder_date_time.as_ref().map(|d| local_date(d, tz));
         let reminder_time = task
             .reminder_date_time
             .as_ref()
-            .map(|d| time_part(&d.date_time))
+            .map(|d| local_time(d, tz))
             .unwrap_or_else(|| "09:00".into());
 
         let due_cal = cal_from(due.as_deref());
@@ -784,6 +787,23 @@ fn time_part(dt: &str) -> String {
     dt.get(11..16).unwrap_or("09:00").to_string()
 }
 
+/// The local calendar day (`YYYY-MM-DD`) of a stored `dateTimeTimeZone`, converted
+/// from the zone Graph stored it in into `tz`. Falls back to the raw date if the
+/// stored value or zone can't be parsed.
+fn local_date(dtz: &DateTimeTimeZone, tz: &str) -> String {
+    crate::reminders::local_civil(dtz, tz)
+        .map(|dt| dt.strftime("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| date_part(&dtz.date_time))
+}
+
+/// The local wall-clock `HH:MM` of a stored `dateTimeTimeZone`, converted from the
+/// zone Graph stored it in into `tz`. Falls back to the raw time on a parse error.
+fn local_time(dtz: &DateTimeTimeZone, tz: &str) -> String {
+    crate::reminders::local_civil(dtz, tz)
+        .map(|dt| dt.strftime("%H:%M").to_string())
+        .unwrap_or_else(|| time_part(&dtz.date_time))
+}
+
 fn index_from_str(s: &str) -> Option<WeekIndex> {
     Some(match s {
         "first" => WeekIndex::First,
@@ -1012,11 +1032,64 @@ mod tests {
 
     #[test]
     fn from_task_prefills_basic_fields() {
-        let f = TaskForm::from_task(&task_with(None, "2026-06-20"));
+        let f = TaskForm::from_task(&task_with(None, "2026-06-20"), "UTC");
         assert_eq!(f.mode, FormMode::Edit { task_id: "T1".into() });
         assert_eq!(f.title, "Pay rent");
         assert_eq!(f.due.as_deref(), Some("2026-06-20"));
         assert_eq!(f.repeat, RepeatKind::None);
+    }
+
+    fn reminder_task(date_time: &str, zone: &str) -> TodoTask {
+        TodoTask {
+            id: "T1".into(),
+            title: "Pay rent".into(),
+            is_reminder_on: true,
+            reminder_date_time: Some(DateTimeTimeZone {
+                date_time: date_time.into(),
+                time_zone: Some(zone.into()),
+            }),
+            ..TodoTask::default()
+        }
+    }
+
+    #[test]
+    fn from_task_shows_reminder_in_local_time() {
+        // Graph echoes reminders back in UTC: a 09:00 America/Sao_Paulo (UTC-3)
+        // reminder returns as 12:00 UTC. The form must show 09:00, not 12:00.
+        let f = TaskForm::from_task(
+            &reminder_task("2026-06-15T12:00:00.0000000", "UTC"),
+            "America/Sao_Paulo",
+        );
+        assert!(f.reminder_on);
+        assert_eq!(f.reminder_time, "09:00");
+        assert_eq!(f.reminder_date.as_deref(), Some("2026-06-15"));
+    }
+
+    #[test]
+    fn reminder_survives_edit_without_drifting() {
+        // Reopen 11:00 UTC (08:00 local) and re-save: the body must reproduce
+        // 08:00 local, which Graph re-stores as the same 11:00 UTC - no shift.
+        let f = TaskForm::from_task(
+            &reminder_task("2026-06-15T11:00:00.0000000", "UTC"),
+            "America/Sao_Paulo",
+        );
+        assert_eq!(f.reminder_time, "08:00");
+        let rem = f.to_input("America/Sao_Paulo").unwrap().reminder.unwrap();
+        assert_eq!(rem.date_time, "2026-06-15T08:00:00.0000000");
+        assert_eq!(rem.time_zone.as_deref(), Some("America/Sao_Paulo"));
+    }
+
+    #[test]
+    fn from_task_shows_due_day_in_local_zone() {
+        // A due day set at local midnight in Asia/Tokyo (UTC+9) is stored by Graph
+        // as the prior day 15:00 UTC. The form must still show the local day.
+        let mut task = task_with(None, "2026-06-20");
+        task.due_date_time = Some(DateTimeTimeZone {
+            date_time: "2026-06-19T15:00:00.0000000".into(),
+            time_zone: Some("UTC".into()),
+        });
+        let f = TaskForm::from_task(&task, "Asia/Tokyo");
+        assert_eq!(f.due.as_deref(), Some("2026-06-20"));
     }
 
     #[test]
@@ -1028,7 +1101,7 @@ mod tests {
         let rec = weekly.to_input("UTC").unwrap().recurrence;
 
         let task = task_with(rec.clone(), "2026-06-20");
-        let form = TaskForm::from_task(&task);
+        let form = TaskForm::from_task(&task, "UTC");
         let rec2 = form.to_input("UTC").unwrap().recurrence;
         assert_eq!(rec, rec2); // schedule preserved through edit
     }
@@ -1049,7 +1122,7 @@ mod tests {
             src.nth_index = WeekIndex::Second;
             src.nth_weekday = 2; // Wednesday
             let rec = src.to_input("UTC").unwrap().recurrence;
-            let form = TaskForm::from_task(&task_with(rec.clone(), "2026-06-20"));
+            let form = TaskForm::from_task(&task_with(rec.clone(), "2026-06-20"), "UTC");
             assert_eq!(rec, form.to_input("UTC").unwrap().recurrence, "{repeat:?}/{mode:?}");
         }
     }
@@ -1075,7 +1148,7 @@ mod tests {
                 recurrence_time_zone: None,
             },
         };
-        let form = TaskForm::from_task(&task_with(Some(rec), "2026-06-20"));
+        let form = TaskForm::from_task(&task_with(Some(rec), "2026-06-20"), "UTC");
         assert_eq!(form.repeat, RepeatKind::None);
     }
 
@@ -1101,10 +1174,10 @@ mod tests {
             },
         };
         // Untouched: saving an edit preserves the unrepresentable recurrence.
-        let form = TaskForm::from_task(&task_with(Some(rec.clone()), "2026-06-20"));
+        let form = TaskForm::from_task(&task_with(Some(rec.clone()), "2026-06-20"), "UTC");
         assert!(form.to_input("UTC").unwrap().recurrence.is_some());
         // Touching the repeat control discards it, so the edit can clear recurrence.
-        let mut edited = TaskForm::from_task(&task_with(Some(rec), "2026-06-20"));
+        let mut edited = TaskForm::from_task(&task_with(Some(rec), "2026-06-20"), "UTC");
         edited.apply(FormMsg::Repeat(RepeatKind::None));
         assert!(edited.to_input("UTC").unwrap().recurrence.is_none());
     }

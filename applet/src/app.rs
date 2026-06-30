@@ -463,7 +463,8 @@ impl cosmic::Application for AppModel {
                     && let AppState::Ready(ready) = &mut self.state
                     && let Some(task) = ready.tasks.iter().find(|t| t.id == id)
                 {
-                    ready.view = PopupView::Form(Box::new(crate::task_form::TaskForm::from_task(task)));
+                    ready.view =
+                        PopupView::Form(Box::new(crate::task_form::TaskForm::from_task(task, &system_tz())));
                 }
             }
             Message::CancelForm => {

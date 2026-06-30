@@ -3,7 +3,7 @@
 //! `crate::notify`.
 
 use jiff::Timestamp;
-use outlook_tasks_core::models::{TaskStatus, TodoTask};
+use outlook_tasks_core::models::{DateTimeTimeZone, TaskStatus, TodoTask};
 
 /// The instant a task's reminder is set for, or `None` if the reminder is off,
 /// absent, or the stored date/zone can't be parsed.
@@ -14,7 +14,12 @@ pub fn reminder_instant(task: &TodoTask) -> Option<Timestamp> {
     if !task.is_reminder_on {
         return None;
     }
-    let dtz = task.reminder_date_time.as_ref()?;
+    to_instant(task.reminder_date_time.as_ref()?)
+}
+
+/// Resolves a stored `dateTimeTimeZone` (a wall-clock time plus its zone name) to
+/// an absolute instant. `None` if the date or zone can't be parsed.
+fn to_instant(dtz: &DateTimeTimeZone) -> Option<Timestamp> {
     // Drop any fractional seconds; reminders are minute-granular.
     let civil = dtz.date_time.get(..19).unwrap_or(dtz.date_time.as_str());
     let dt: jiff::civil::DateTime = civil.parse().ok()?;
@@ -23,6 +28,16 @@ pub fn reminder_instant(task: &TodoTask) -> Option<Timestamp> {
         None => jiff::tz::TimeZone::system(),
     };
     dt.to_zoned(tz).ok().map(|z| z.timestamp())
+}
+
+/// Re-expresses a stored `dateTimeTimeZone` as the equivalent wall-clock time in
+/// the `local` zone (an IANA or Windows zone name). Graph echoes reminder/due
+/// times back in UTC, so the form uses this to show the local time the user set
+/// rather than the UTC time on the wire. `None` if the stored value or `local`
+/// can't be parsed.
+pub fn local_civil(dtz: &DateTimeTimeZone, local: &str) -> Option<jiff::civil::DateTime> {
+    let target = resolve_zone(local)?;
+    Some(to_instant(dtz)?.to_zoned(target).datetime())
 }
 
 /// Resolves a stored zone name to a `TimeZone`. IANA names resolve directly;
